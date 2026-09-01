@@ -60,7 +60,7 @@ El botón **Crear orden** (o **ráfaga ×5**) hace el mismo `POST /api/orders` q
 - la fila aparecer en el outbox como `PENDING`, con `publishedAt` vacío;
 - esa misma fila pasar a `PUBLISHED` un par de segundos después, con la latencia real `commit → ack` calculada;
 - la notificación aparecer en la columna 3 — que sale de la base del **otro** servicio — exactamente una vez;
-- si algún evento agotó los reintentos, la fila queda `FAILED` en rojo con su contador de intentos.
+- si algún evento agotó los reintentos rápidos, la fila queda `FAILED` en rojo con su contador de intentos **y la cuenta regresiva al próximo** (`reintenta en 32s`): rojo acá significa *degradado y recuperándose solo*, no *abandonado*.
 
 Todo lo que sigue en esta sección es el mismo circuito hecho a mano.
 
@@ -92,7 +92,7 @@ O directamente contra la base, si se quiere confirmar que el endpoint no está i
 
 ```bash
 docker exec -it order-outbox-service-postgres-orders-1 \
-  psql -U orders -d orders -c "SELECT aggregate_id, status, publish_attempts FROM outbox_events;"
+  psql -U orders -d orders -c "SELECT aggregate_id, status, publish_attempts, next_attempt_at FROM outbox_events;"
 ```
 
 Recuperar la orden creada:
@@ -119,18 +119,41 @@ A los ~2 segundos de crear la orden (el relay pollea cada `outbox.relay.poll-int
   curl -s -o /dev/null -w "%{http_code}\n" -H "Origin: http://localhost:8008" http://localhost:8006/api/outbox  # 200
   ```
 - **Cambié `VITE_ORDER_API_URL` y el panel sigue pegándole a `localhost`**: son variables de *build*, no de runtime. `docker compose restart dashboard` no alcanza; hace falta `docker compose up -d --build dashboard` para recompilar el bundle.
-- **El outbox de una orden queda en `FAILED` después de un blip de Kafka, pero la notificación de esa orden existe igual**: esto pasó de verdad durante la verificación de este mismo repo (ver más abajo) y **no es un bug** — es una consecuencia honesta de que el relay usa *at-least-once* con reintentos acotados por tiempo, no un productor transaccional. Detalle completo abajo.
+- **Una fila del outbox está en `FAILED` y en rojo en el panel**: no hay nada que hacer a mano. `FAILED` es un estado **blando**: significa "este evento agotó sus reintentos rápidos, está degradado, miralo si es viejo", no "está abandonado". El relay lo sigue levantando indefinidamente, cada vez más espaciado hasta un tope de 5 minutos, y la fila se recupera sola cuando Kafka vuelve. El panel muestra la cuenta regresiva al próximo intento justamente para que el rojo no se lea como "muerto". Si una fila lleva horas en `FAILED`, el problema no está en el outbox: es que el broker no volvió.
+- **Una fila en `FAILED` tiene `next_attempt_at` viejísimo y aun así no se reintenta**: eso sí sería un bug, y apunta a que el scheduler del relay no está corriendo. `docker compose logs order-service | grep "Outbox relay run"` — si no hay líneas mientras hay filas vencidas, el `@Scheduled` no está vivo.
+- **`order-service` no arranca y el log dice `outbox.relay.publish-timeout-ms ... must be strictly greater than ... delivery.timeout.ms`**: es una validación deliberada, no un accidente. Ver abajo por qué esos dos números no pueden desincronizarse.
 
-### El caso real: outbox `FAILED` con notificación igual creada
+### El caso real que originó todo esto: dos deadlines discutiendo
 
-Durante la verificación manual de este proyecto se reprodujo el escenario "matar Kafka a mitad de flujo" (`docker compose stop kafka`, crear una orden, `docker compose start kafka`). El resultado observado:
+La primera versión de este repo tenía un bug real, reproducido durante su verificación manual con el escenario "matar Kafka a mitad de flujo" (`docker compose stop kafka`, crear una orden, `docker compose start kafka`):
 
-- El outbox de esa orden terminó en `status=FAILED` con `publish_attempts=5` (agotó `MAX_PUBLISH_ATTEMPTS`).
+- El outbox de esa orden terminó en `status=FAILED` con `publish_attempts=5`.
 - La notificación correspondiente **sí existía** en `notification-service`, exactamente una vez.
 
-¿Por qué pueden pasar las dos cosas a la vez? `KafkaEventPublisher.publish(...)` hace `kafkaTemplate.send(...).get(publishTimeoutMs)` — un timeout **local**, de cuánto espera *este* proceso una confirmación. El cliente de Kafka, por debajo, sigue reintentando el `send()` en segundo plano según su propia política (`delivery.timeout.ms`, no `max.block.ms`) mucho más allá de esos 5 segundos, sobre todo justo después de un restart del broker mientras se reelige líder de partición (`NOT_LEADER_OR_FOLLOWER` en los logs). El resultado: el relay agotó sus 5 intentos *locales* dando cada uno por perdido antes de tiempo, pero al menos uno de esos `send()` subyacentes efectivamente llegó a Kafka más tarde — y como el mismo evento se reintenta con idéntico `eventId`, hasta pueden haber llegado **varias copias** del mismo mensaje al topic (se confirmó exactamente eso: al resetear el consumer group a `earliest` y reprocesar el topic entero, aparecieron 5 líneas de "Skipped duplicate event" para ese `eventId`, todas correctamente ignoradas).
+Las dos cosas a la vez, porque había **dos deadlines sobre la misma operación**. `KafkaEventPublisher.publish(...)` hace `kafkaTemplate.send(...).get(publishTimeoutMs)` — un timeout **local**, de cuánto espera *este* hilo una confirmación. El cliente de Kafka, por debajo, sigue reintentando el `send()` según su propia política, `delivery.timeout.ms`, **que nunca se había configurado**: 120 segundos por default. Con el timeout local en 5s, el relay daba por perdido a los 5 segundos un `send()` que el productor terminaba entregando un minuto más tarde — sobre todo justo después de un restart del broker, mientras se reelige líder de partición (`NOT_LEADER_OR_FOLLOWER` en los logs). Consecuencias medidas: filas marcadas `FAILED` cuyos eventos **sí** se habían publicado, y el mismo evento republicado en el poll siguiente, hasta **5 copias del mismo mensaje en el topic** (confirmado reseteando el consumer group a `earliest` y reprocesando el topic entero: aparecieron 5 líneas de "Skipped duplicate event" para ese `eventId`, todas correctamente ignoradas por el consumidor idempotente).
 
-La garantía real de este sistema no es "el estado del outbox siempre refleja la verdad del broker" — es **"ningún evento se pierde silenciosamente, y ningún evento produce más de un efecto"**. Ambas partes de esa garantía se sostuvieron: la notificación se creó y **exactamente una vez**, verificado con el topic completo reprocesado desde el offset 0. Un `outbox_events.status = FAILED` en producción debería ser una señal para investigar/reintentar manualmente — no una prueba de pérdida de datos.
+El arreglo tiene dos mitades.
+
+**1. Un solo deadline manda.** El del propio productor: `delivery.timeout.ms: 8000`. El `.get(...)` local pasó a ser una **red de seguridad estrictamente mayor** (`publish-timeout-ms: 10000`), no una segunda política de reintentos. Así el veredicto del productor llega siempre primero, y que salte el timeout local dejó de significar "me impacienté" para significar "el productor se colgó". La relación no queda librada a dos números sueltos en dos archivos que una edición futura puede separar: `KafkaEventPublisher` lee en el arranque el `delivery.timeout.ms` **efectivo** de la producer factory —no lo que se supone que dice el YAML— y **se niega a arrancar** si la red de seguridad no es estrictamente mayor. Un deploy mal configurado falla ruidoso en el boot en vez de resucitar el bug en silencio. `enable.idempotence` queda además explícito en `true`: ya era el default del cliente desde Kafka 3.0 (KIP-679), pero sin él los reintentos internos del productor pueden escribir copias del mismo mensaje en el topic.
+
+**2. `FAILED` dejó de ser terminal.** Antes, a los 5 intentos la fila quedaba muerta y necesitaba intervención manual. Pero republicar es **seguro** — para eso está el consumidor idempotente — así que abandonar la fila era la peor opción disponible. Ahora un intento fallido no solo incrementa el contador: también calcula, con backoff exponencial acotado (`BASE_DELAY` 2s × `MULTIPLIER` 2 elevado a los intentos, con tope `MAX_DELAY` de 5 minutos), cuándo se puede volver a intentar. Pasados los `MAX_PUBLISH_ATTEMPTS` la fila se marca `FAILED` **y se sigue reintentando** al intervalo del tope, para siempre. `FAILED` es ahora una señal de "degradado, miralo si es viejo", no una lápida; y de paso el relay dejó de martillar cada 2 segundos a un broker que está caído.
+
+Medido sobre el stack vivo, apagando Kafka y creando una orden (`next_attempt_at` de la propia fila, en UTC):
+
+```
+06:09:59  PENDING   intentos=0   next=—            orden creada, Kafka caído
+06:10:08  PENDING   intentos=1   next=06:10:10     +2s
+06:10:19  PENDING   intentos=2   next=06:10:22     +4s
+06:10:32  PENDING   intentos=3   next=06:10:40     +8s
+06:10:48  PENDING   intentos=4   next=06:11:04     +16s
+06:11:14  FAILED    intentos=5   next=06:11:46     +32s   ← degradado, NO abandonado
+06:11:15  (docker compose start kafka)
+06:11:51  PUBLISHED intentos=5   next=—            se recuperó solo
+```
+
+Seis intentos en 112 segundos de outage, no cincuenta y seis. La notificación de esa orden se creó **exactamente una vez** (`06:11:51.033943Z`), sin tocar la base de datos ni reiniciar nada.
+
+La garantía del sistema no cambió — sigue siendo **"ningún evento se pierde silenciosamente, y ningún evento produce más de un efecto"** — pero ahora el estado del outbox no le miente a quien lo mira, y ninguna fila necesita un humano para salir del pozo.
 
 ## What Problem It Solves
 
@@ -250,23 +273,29 @@ OrderController ──▶ CreateOrderUseCase (CreateOrderService)
 ### 2. Relay del outbox (scheduler, cada 2s, sin transacción abierta durante el I/O de red)
 
 ```
-@Scheduled ──▶ OutboxRelayScheduler ──▶ OutboxRelayService.relayPendingEvents()
+@Scheduled ──▶ OutboxRelayScheduler ──▶ OutboxRelayService.relayDueEvents()
                                               │
-                                     findPendingBatch(50)
-                                              │
+                                     findDueBatch(50, now)
+                                       status ∈ {PENDING, FAILED}
+                                       Y next_attempt_at IS NULL O <= now
+                                              │              ↑ lo que todavía no vence, se saltea
                                   por cada evento (aislado):
                                               │
                                      eventPublisherPort.publish(event)   ← Kafka, SIN transacción
                                               │
                                    ┌──────── éxito ────────┐    ┌──── falla ────┐
                                    ▼                        │    ▼               │
-                          markPublished(now)                │  recordFailedAttempt()
-                                   │                        │    │
+                          markPublished(now)                │  recordFailedAttempt(now)
+                          next_attempt_at = null            │    ++intentos, nuevo status,
+                                   │                        │    next_attempt_at = now + backoff
                           transactionRunner.run(            │  transactionRunner.run(
                             () -> outboxRepository.save())  │    () -> outboxRepository.save())
-                          ← transacción CORTA, por evento    │  ← PENDING otra vez, o FAILED
-                                                              │    si supera MAX_PUBLISH_ATTEMPTS
+                          ← transacción CORTA, por evento    │  ← PENDING, o FAILED pasados
+                                                              │    MAX_PUBLISH_ATTEMPTS — pero
+                                                              │    SIEMPRE con próximo intento
 ```
+
+Las tres cosas que cambia un intento fallido —contador, estado y próximo intento— se calculan juntas dentro de `OutboxEvent`, nunca en el servicio ni en el SQL. Repartidas entre tres lugares terminan desincronizándose.
 
 ### 3. Consumo idempotente (Kafka listener, notification-service)
 
@@ -305,7 +334,8 @@ order-outbox-service/
 ├── order-service/
 │   ├── Dockerfile                    # multi-stage: maven:3.9-eclipse-temurin-21 → jre-jammy
 │   └── src/main/java/.../order/
-│       ├── domain/                   # Order, Money, OutboxEvent... — cero imports de Spring
+│       ├── domain/                   # Order, Money, OutboxEvent, RetryBackoffPolicy...
+│       │                             # — cero imports de Spring
 │       │   └── event/                # OrderCreatedEvent (contrato de wire)
 │       ├── application/
 │       │   ├── port/in/              # CreateOrderUseCase, GetOrderUseCase, RelayOutboxEventsUseCase
@@ -354,7 +384,8 @@ order-outbox-service/
 ## Design Patterns
 
 - **Transactional Outbox**: `Order`/`Notification` y su hecho de dominio correspondiente se escriben en una sola transacción; un proceso separado (el relay) es responsable de la entrega al broker. Elimina el dual-write problem sin necesitar 2PC ni Debezium/CDC.
-- **Idempotent Consumer**: `processed_events.event_id` como *primary key* convierte "¿ya procesé esto?" en una propiedad garantizada por la base de datos, no en lógica de aplicación que puede tener carreras.
+- **Idempotent Consumer**: `processed_events.event_id` como *primary key* convierte "¿ya procesé esto?" en una propiedad garantizada por la base de datos, no en lógica de aplicación que puede tener carreras. Es también lo que hace *barato* reintentar del lado del productor: si republicar no cuesta nada, no hay razón para abandonar una fila del outbox nunca.
+- **Exponential backoff con tope**: `RetryBackoffPolicy` es aritmética de dominio pura —sin reloj, sin scheduler, sin Spring— que recibe el instante en que falló una publicación y devuelve cuándo se puede reintentar. Crece (deja de martillar al broker caído) y deja de crecer (una fila degradada mantiene un latido lento en vez de irse a semanas vista). El tope es lo que permite que `FAILED` sea un estado blando y auto-reparable en vez de terminal.
 - **Ports & Adapters (hexagonal)**: `domain/` y `application/` no importan Spring, JPA ni Hibernate — verificado por ArchUnit, no solo por convención. Los adaptadores (`adapter/in/*`, `adapter/out/*`) son el único lugar donde el framework existe.
 - **Composition Root**: `OrderServiceBeanConfiguration`/`NotificationServiceBeanConfiguration` son el único punto donde las clases Java puras de `application/service` se instancian y se conectan a sus adaptadores Spring — mismo criterio que `task-queue`.
 - **Repository**: `OrderRepository`, `OutboxRepository`, `NotificationRepository`, `ProcessedEventRepository` — puertos de salida con una sola implementación JPA cada uno, pero declarados como interfaz para que `application/` dependa de una abstracción, no de Hibernate.
@@ -366,7 +397,10 @@ order-outbox-service/
 - **¿Por qué no hay un DTO compartido entre los dos servicios?** Un JAR común con el contrato del evento es el antipatrón "monolito distribuido": cualquier cambio de forma obliga a versionar y desplegar ambos servicios juntos, exactamente lo que microservicios independientes deberían evitar. Cada servicio define su propio `OrderCreatedEvent`/`OrderCreatedEventPayload`. El costo real de esto — que las dos copias puedan divergir sin que el compilador avise — se mitiga con fixtures de test espejadas en ambos módulos, no con código compartido.
 - **¿Por qué dos Postgres separados?** Cada servicio es dueño de su propia base — nadie hace joins cross-servicio ni depende del schema interno del otro. Es la regla "database per service" tomada en serio, no solo declarada.
 - **¿Por qué el publish a Kafka es bloqueante (`.get(timeoutMs)`)?** Porque corre en el scheduler del relay, no en el hilo de un request HTTP. No hay nadie esperando ese hilo — la simplicidad de saber inmediatamente si el publish tuvo éxito vale más que el throughput que se ganaría con un callback asincrónico acá.
-- **¿Por qué `OrderQueryPort`/`OutboxQueryPort` en vez de agregar métodos a `OrderRepository`/`OutboxRepository`?** Interface Segregation aplicado en serio. `OutboxRepository` existe para el relay: `save` + `findPendingBatch`, y el relay nunca quiere ver una fila `PUBLISHED`. El panel quiere exactamente lo contrario: las últimas N filas *con cualquier estado*. Meter ese método en el puerto del relay obligaría a toda implementación suya — incluidos los fakes in-memory de los tests de casos de uso — a crecer un método que ese caso de uso jamás llama, y acoplaría dos consumidores que no tienen nada que ver. Son dos puertos angostos; el adaptador JPA implementa los dos (`OutboxEventPersistenceAdapter implements OutboxRepository, OutboxQueryPort`), porque lo que se segrega es lo que *ve el llamador*, no la clase que lo cumple.
+- **¿Por qué `publish-timeout-ms` (10000) es mayor que `delivery.timeout.ms` (8000), y por qué el servicio no arranca si eso se rompe?** Porque son dos deadlines sobre la *misma* operación, y cuando ambos se toman en serio se contradicen: el `.get(...)` es local a este hilo y no tiene ninguna autoridad sobre el cliente de Kafka, que sigue reintentando por debajo según `delivery.timeout.ms`. Si el local vence primero, el relay declara un fracaso que el productor todavía puede convertir en éxito — que es exactamente el bug que este repo tuvo (ver Troubleshooting). La única jerarquía sana es: **el productor dicta el veredicto, el timeout local es solo una red de seguridad más grande**. Y como dos constantes en dos archivos distintos se desincronizan tarde o temprano, `KafkaEventPublisher` lee el valor *efectivo* de la producer factory al construirse y falla el arranque si la relación no se cumple. Un número mal puesto es un error de boot, no un misterio en producción tres semanas después.
+- **¿Por qué `FAILED` no es terminal?** Porque el costo de reintentar es ~cero (el consumidor es idempotente) y el costo de no reintentar es una fila muerta que necesita un humano. Con esa asimetría, "dejar de intentar" no se justifica: `MAX_PUBLISH_ATTEMPTS` pasó a marcar el punto donde el evento se declara **degradado** — visible, en rojo, alertable — sin dejar de reintentarse al intervalo del tope. El `publish_attempts` sigue siendo la señal para investigar; simplemente ya no es una sentencia. Lo que sí queda fuera de alcance es una dead-letter table: con reintento perpetuo y acotado, y un demo de dos servicios, agregar un destino final sería ceremonia.
+- **¿Por qué el backoff vive en `domain/` y no en el servicio del relay?** Porque un intento fallido cambia tres cosas a la vez —`publish_attempts`, `status` y `next_attempt_at`— y son un solo hecho, no tres. Calculadas en el servicio (o peor, en el `UPDATE`) se pueden aplicar a medias; dentro de `OutboxEvent.recordFailedAttempt(failedAt)` se mueven juntas o no se mueven. El adaptador solo persiste lo que el dominio ya decidió: `OutboxRepository.save()` nunca calcula un estado, y `findDueBatch(batchSize, now)` recibe el instante en vez de leer un reloj propio, para que el tiempo del relay siga siendo testeable del lado de adentro del hexágono.
+- **¿Por qué `OrderQueryPort`/`OutboxQueryPort` en vez de agregar métodos a `OrderRepository`/`OutboxRepository`?** Interface Segregation aplicado en serio. `OutboxRepository` existe para el relay: `save` + `findDueBatch`, y el relay nunca quiere ver una fila `PUBLISHED` — ni siquiera una `FAILED` cuyo backoff todavía no venció. El panel quiere exactamente lo contrario: las últimas N filas *con cualquier estado*. Meter ese método en el puerto del relay obligaría a toda implementación suya — incluidos los fakes in-memory de los tests de casos de uso — a crecer un método que ese caso de uso jamás llama, y acoplaría dos consumidores que no tienen nada que ver. Son dos puertos angostos; el adaptador JPA implementa los dos (`OutboxEventPersistenceAdapter implements OutboxRepository, OutboxQueryPort`), porque lo que se segrega es lo que *ve el llamador*, no la clase que lo cumple.
 - **¿Por qué los endpoints de lectura no tienen un `port/in`?** `OutboxController` y el nuevo `GET /api/orders` leen derecho a través de un puerto de salida, sin caso de uso intermedio — el mismo atajo CQRS-lite que ya usaba `NotificationController`. Son lecturas sin ninguna lógica de negocio: un `GetOutboxEventsUseCase` que solo reenvía la llamada sería ceremonia, no arquitectura. El camino de escritura (`CreateOrderUseCase`, `RelayOutboxEventsUseCase`) sí conserva sus puertos de entrada, que es donde hay reglas que proteger.
 - **¿Por qué el panel usa polling y no SSE/WebSocket?** Simplicidad deliberada. Son 3 endpoints de lectura acotados y un relay que ya funciona por poll cada 2s: un `setInterval` de 1s muestra la transición `PENDING → PUBLISHED` con resolución de sobra. Un canal de streaming agregaría reconexión, backpressure y estado en el servidor a cambio de nada visible en un demo de dos servicios. Está anotado como decisión, no como omisión.
 - **¿Por qué el CORS vive en `config/` y no en `application/`?** Porque es política de transporte HTTP: `domain` y `application` no saben que el mundo exterior habla HTTP, mucho menos qué orígenes de navegador están permitidos. `WebCorsConfiguration` es un adaptador de infraestructura, y la lista de orígenes es configuración (`WEB_CORS_ALLOWED_ORIGINS`), no una constante `localhost` en el código.
@@ -421,10 +455,14 @@ outbox_events (
   status            VARCHAR(32) NOT NULL,      -- PENDING | PUBLISHED | FAILED
   occurred_at       TIMESTAMPTZ NOT NULL,
   publish_attempts  INTEGER NOT NULL DEFAULT 0,
-  published_at      TIMESTAMPTZ
+  published_at      TIMESTAMPTZ,
+  next_attempt_at   TIMESTAMPTZ                -- NULL = "vencido ahora" (V3)
 )
--- índice parcial: el relay solo escanea PENDING
-CREATE INDEX idx_outbox_events_pending ON outbox_events (occurred_at) WHERE status = 'PENDING';
+-- índice parcial: el relay escanea todo lo que sigue pendiente de entrega, no solo PENDING.
+-- La otra mitad del filtro (next_attempt_at <= now()) no es inmutable y no puede vivir en el
+-- predicado de un índice, así que queda como filtro barato sobre el conjunto ya acotado.
+CREATE INDEX idx_outbox_events_due ON outbox_events (occurred_at)
+    WHERE status IN ('PENDING', 'FAILED');
 ```
 
 **notification-service** (`postgres-notifications`)
@@ -468,12 +506,24 @@ processed_events (
     "status": "PENDING",
     "publishAttempts": 0,
     "occurredAt": "2026-09-01T05:18:45.336935Z",
-    "publishedAt": null
+    "publishedAt": null,
+    "nextAttemptAt": null
   }
 ]
 ```
 
-Dos segundos después, esa misma fila: `"status": "PUBLISHED"` y `"publishedAt": "2026-09-01T05:18:47.815753Z"`.
+Dos segundos después, esa misma fila: `"status": "PUBLISHED"`, `"publishedAt": "2026-09-01T05:18:47.815753Z"` y `"nextAttemptAt": null`.
+
+`nextAttemptAt` es parte del ciclo de vida, no un detalle de implementación: es lo que permite distinguir una fila **degradada pero recuperándose sola** de una abandonada. `null` significa "ya publicada, o le toca en el próximo poll del relay"; con un valor, el relay la va a saltear hasta ese instante:
+
+```json
+{
+  "status": "FAILED",
+  "publishAttempts": 5,
+  "publishedAt": null,
+  "nextAttemptAt": "2026-09-01T05:20:19.402118Z"
+}
+```
 
 Body de `POST /api/orders`:
 
@@ -511,7 +561,11 @@ Variables relevantes (con sus defaults en `application.yml`; `docker-compose.yml
 | `SPRING_DATASOURCE_URL` / `_USERNAME` / `_PASSWORD` | ambos | `localhost:5432/orders` (o 5433/notifications) | Conexión a Postgres |
 | `SPRING_KAFKA_BOOTSTRAP_SERVERS` | ambos | `localhost:9092` | Broker de Kafka |
 | `outbox.relay.poll-interval-ms` | order-service | `2000` | Cada cuánto corre el scheduler del relay |
-| `outbox.relay.publish-timeout-ms` | order-service | `5000` | Cuánto espera `KafkaEventPublisher` una confirmación local (ver Troubleshooting) |
+| `outbox.relay.publish-timeout-ms` | order-service | `10000` | Red de seguridad **local** de `KafkaEventPublisher`. Debe ser estrictamente mayor que `delivery.timeout.ms` o el servicio no arranca (ver Troubleshooting) |
+| `spring.kafka.producer.properties.delivery.timeout.ms` | order-service | `8000` | El deadline que **manda**: cuánto reintenta el cliente de Kafka antes de fallar el `Future` |
+| `spring.kafka.producer.properties.request.timeout.ms` | order-service | `4000` | Por request al broker. Kafka exige `request.timeout.ms + linger.ms <= delivery.timeout.ms` |
+| `spring.kafka.producer.properties.max.block.ms` | order-service | `5000` | Cuánto bloquea `send()` esperando metadata con el broker caído |
+| `spring.kafka.producer.properties.enable.idempotence` | order-service | `true` | Ya es el default del cliente (KIP-679); explícito para que un downgrade no lo apague en silencio |
 | `spring.kafka.consumer.group-id` | notification-service | `notification-service` | Consumer group — usado también en el checklist de reset de offsets |
 | `WEB_CORS_ALLOWED_ORIGINS` (`web.cors.allowed-origins`) | ambos | `http://localhost:8008,http://localhost:5173` | Orígenes de navegador autorizados sobre `/api/**`. 8008 es el panel en Docker; 5173 es `npm run dev`. Cualquier otro origen recibe `403`. |
 | `VITE_ORDER_API_URL` | dashboard (build) | `http://localhost:8006` | A dónde apunta el navegador para `GET /api/orders`, `GET /api/outbox` y `POST /api/orders` |
@@ -538,16 +592,16 @@ mvn -pl order-service,notification-service verify
 
 Corre, para cada módulo:
 
-- **Unit** (`*Test.java`, Surefire): dominio puro (`OrderTest`, `MoneyTest`, `OutboxEventTest`, `NotificationTest`, `ProcessedEventTest`) y casos de uso contra **fakes en memoria escritos a mano** (`InMemoryOrderRepository`, `InMemoryOutboxRepository`, `InMemoryTransactionRunner`, etc.) — sin Mockito.
+- **Unit** (`*Test.java`, Surefire): dominio puro (`OrderTest`, `MoneyTest`, `OutboxEventTest`, `RetryBackoffPolicyTest`, `NotificationTest`, `ProcessedEventTest`) y casos de uso contra **fakes en memoria escritos a mano** (`InMemoryOrderRepository`, `InMemoryOutboxRepository`, `InMemoryTransactionRunner`, `AdjustableClock`, etc.) — sin Mockito. `RetryBackoffPolicyTest` fija las dos propiedades operativas del backoff: que crece y que **deja** de crecer (incluido que no desborda la aritmética con un `publishAttempts` de `Integer.MAX_VALUE`). `OutboxRelayServiceTest` prueba que una fila cuyo backoff no venció se **saltea** — el relay no la reintenta — y que una fila ya `FAILED` sigue en la rotación y se recupera sola cuando el publisher deja de fallar. El reloj se adelanta a mano (`AdjustableClock`): un backoff de cinco minutos se ejercita en microsegundos.
 - **Web** (`OrderControllerTest`, `OutboxControllerTest`, también Surefire): `MockMvc` standalone sobre el controlador real, cableado a esos mismos fakes — sin `ApplicationContext` ni base de datos. Van por HTTP y no por llamada directa porque lo que más fácil se rompe es el ruteo: `GET /api/orders` (colección) tiene que convivir con `GET /api/orders/{id}` sin taparse. `OutboxControllerTest` recorre el ciclo completo de una fila: `PENDING` sin `publishedAt` → `PUBLISHED` con uno.
 - **Arquitectura** (`HexagonalArchitectureTest`, también Surefire): las 5 reglas ArchUnit descritas en SOLID.
 - **Integración** (`*IT.java`, Failsafe, Testcontainers — Postgres y Kafka reales):
-  - `OrderPersistenceAdapterIT` — el test insignia: fuerza una excepción a mitad de una transacción y confirma que ni `Order` ni `OutboxEvent` quedaron persistidos. Cubre además los dos puertos de consulta contra el `ORDER BY` real de Postgres, incluida una fila `PUBLISHED` que el relay nunca vería.
-  - `KafkaEventPublisherIT` — publica de verdad y lo verifica con un `KafkaConsumer` plano.
+  - `OrderPersistenceAdapterIT` — el test insignia: fuerza una excepción a mitad de una transacción y confirma que ni `Order` ni `OutboxEvent` quedaron persistidos. Cubre además los dos puertos de consulta contra el `ORDER BY` real de Postgres, incluida una fila `PUBLISHED` que el relay nunca vería, y el filtro de vencimiento del backoff contra SQL real: una fila `FAILED` es invisible **antes** de su `next_attempt_at` y vuelve a aparecer **exactamente** en él. Esa parte de la query es lógica de tres valores sobre un timestamp nullable — el tipo de cosa que un fake acierta por casualidad y Postgres no.
+  - `KafkaEventPublisherIT` — publica de verdad y lo verifica con un `KafkaConsumer` plano. Su contraparte unitaria, `KafkaEventPublisherTest`, no necesita broker: construye producer factories con distintos `delivery.timeout.ms` y confirma que el publisher se niega a arrancar cuando la red de seguridad local no es estrictamente mayor (incluido el caso "nadie configuró `delivery.timeout.ms`", donde el default del cliente son 120s y arrancar sería revivir el bug).
   - `ProcessedEventPersistenceAdapterIT` — confirma que el segundo `tryMarkProcessed` con el mismo `eventId` da `false` por la constraint real de Postgres.
   - `OrderCreatedEventConsumerIT` — el test más importante del repo: produce el mismo mensaje dos veces, confirma exactamente una fila en `notifications`.
 
-Estado verificado en esta máquina: **52 tests unitarios/web/de arquitectura, 10 tests de integración con Testcontainers — los 62 en verde**, más el checklist manual completo sobre `docker compose up` (crear orden, ver el outbox publicarse, matar Kafka a mitad de flujo y confirmar que no se pierde el evento, resetear offsets a `earliest` y reprocesar el topic entero sin duplicados, reiniciar `notification-service` a mitad de un burst de órdenes).
+Estado verificado en esta máquina: **72 tests unitarios/web/de arquitectura, 14 tests de integración con Testcontainers — los 86 en verde**, más el checklist manual completo sobre `docker compose up` (crear orden, ver el outbox publicarse, matar Kafka a mitad de flujo y confirmar que no se pierde el evento, ver los intentos espaciarse con backoff hasta llegar a `FAILED` y **recuperarse solos** cuando Kafka vuelve, resetear offsets a `earliest` y reprocesar el topic entero sin duplicados, reiniciar `notification-service` a mitad de un burst de órdenes).
 
 El dashboard no tiene suite propia (ver "Fuera de alcance"); su red de seguridad es `tsc --noEmit`, que corre como primer paso de `npm run build` y por lo tanto también dentro del `docker compose up --build`:
 
