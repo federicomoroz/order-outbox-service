@@ -7,14 +7,25 @@ import com.federicomoroz.orderoutbox.order.domain.OutboxStatus;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.List;
 
 /**
- * One adapter, two segregated ports: {@link OutboxRepository} for the relay (write + pending
- * batches) and {@link OutboxQueryPort} for read-only observation of the whole outbox.
+ * One adapter, two segregated ports: {@link OutboxRepository} for the relay (write + the batch of
+ * events currently due) and {@link OutboxQueryPort} for read-only observation of the whole outbox.
  */
 @Component
 public class OutboxEventPersistenceAdapter implements OutboxRepository, OutboxQueryPort {
+
+    /**
+     * The domain's answer to "which rows are still the relay's business", flattened to the column
+     * values the query binds. Derived from {@link OutboxStatus}, never re-listed by hand here.
+     */
+    private static final List<String> AWAITING_RELAY_STATUS_NAMES = OutboxStatus.awaitingRelay()
+            .stream()
+            .map(OutboxStatus::name)
+            .sorted()
+            .toList();
 
     private final OutboxEventJpaRepository jpaRepository;
 
@@ -28,9 +39,9 @@ public class OutboxEventPersistenceAdapter implements OutboxRepository, OutboxQu
     }
 
     @Override
-    public List<OutboxEvent> findPendingBatch(int batchSize) {
+    public List<OutboxEvent> findDueBatch(int batchSize, Instant now) {
         return jpaRepository
-                .findByStatusOrderByOccurredAtAsc(OutboxStatus.PENDING.name(), Pageable.ofSize(batchSize))
+                .findDue(AWAITING_RELAY_STATUS_NAMES, now, Pageable.ofSize(batchSize))
                 .stream()
                 .map(OutboxEventMapper::toDomain)
                 .toList();

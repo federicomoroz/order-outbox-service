@@ -9,10 +9,10 @@ import java.util.List;
  * {@link OutboxRepository}.
  *
  * <p>Same Interface Segregation reasoning as {@link OrderQueryPort}: {@code OutboxRepository}
- * is shaped for the relay ({@code save} + {@code findPendingBatch}) and only ever wants
- * {@code PENDING} rows. This port is shaped for an observer that wants the last N events
- * regardless of status — including the {@code PUBLISHED} and {@code FAILED} ones the relay has
- * no business reading back.
+ * is shaped for the relay ({@code save} + {@code findDueBatch}) and only ever wants the rows it
+ * may act on right now — never a {@code PUBLISHED} one, and not even a {@code FAILED} one whose
+ * backoff has not elapsed. This port is shaped for an observer that wants the last N events
+ * regardless of status or of whether they are due.
  */
 public interface OutboxQueryPort {
 

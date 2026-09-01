@@ -4,8 +4,8 @@ import com.federicomoroz.orderoutbox.order.application.port.out.OutboxQueryPort;
 import com.federicomoroz.orderoutbox.order.application.port.out.OutboxRepository;
 import com.federicomoroz.orderoutbox.order.domain.OutboxEvent;
 import com.federicomoroz.orderoutbox.order.domain.OutboxEventId;
-import com.federicomoroz.orderoutbox.order.domain.OutboxStatus;
 
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -22,10 +22,17 @@ public final class InMemoryOutboxRepository implements OutboxRepository, OutboxQ
         store.put(event.id(), event);
     }
 
+    /**
+     * Mirrors the real adapter's query, including the part that is easy to forget: an event whose
+     * backoff window has not elapsed is simply not returned. The "is it due" decision is delegated
+     * to the domain rather than reimplemented here, so this fake cannot drift from the SQL by
+     * accident — both are driven by the same rule.
+     */
     @Override
-    public List<OutboxEvent> findPendingBatch(int batchSize) {
+    public List<OutboxEvent> findDueBatch(int batchSize, Instant now) {
         return store.values().stream()
-                .filter(event -> event.status() == OutboxStatus.PENDING)
+                .filter(event -> event.isDueAt(now))
+                .sorted(Comparator.comparing(OutboxEvent::occurredAt))
                 .limit(batchSize)
                 .toList();
     }

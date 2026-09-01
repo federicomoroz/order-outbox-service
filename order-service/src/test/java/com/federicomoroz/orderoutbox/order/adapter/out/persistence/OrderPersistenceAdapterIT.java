@@ -16,6 +16,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -63,15 +64,104 @@ class OrderPersistenceAdapterIT {
     }
 
     @Test
-    void savedOutboxEventCanBeReadBackInAPendingBatch() {
+    void savedOutboxEventCanBeReadBackInADueBatch() {
         OutboxEvent event = OutboxEvent.record("Order", "order-" + UUID.randomUUID(), "OrderCreated",
                 "{\"k\":\"v\"}", Instant.now(FIXED_CLOCK));
 
         transactionRunner.run(() -> outboxEventPersistenceAdapter.save(event));
 
-        assertThat(outboxEventPersistenceAdapter.findPendingBatch(50))
+        assertThat(outboxEventPersistenceAdapter.findDueBatch(50, Instant.now(FIXED_CLOCK)))
                 .extracting(OutboxEvent::id)
                 .contains(event.id());
+    }
+
+    /**
+     * The backoff has to hold against real SQL, not just against the in-memory fake: the
+     * {@code next_attempt_at IS NULL OR next_attempt_at <= now} half of the relay's query is
+     * three-valued logic over a nullable timestamp, which is exactly the kind of thing a fake
+     * gets right by accident and Postgres does not.
+     */
+    @Test
+    void aBackedOffEventIsInvisibleToTheRelayUntilItsWindowElapses_realPostgres() {
+        Instant failedAt = Instant.parse("2025-08-01T10:00:00Z");
+        OutboxEvent event = OutboxEvent.record("Order", "order-" + UUID.randomUUID(), "OrderCreated",
+                "{\"k\":\"v\"}", Instant.parse("2025-08-01T09:59:00Z"));
+        event.recordFailedAttempt(failedAt);
+        Instant nextAttemptAt = event.nextAttemptAt();
+
+        transactionRunner.run(() -> outboxEventPersistenceAdapter.save(event));
+
+        assertThat(outboxEventPersistenceAdapter.findDueBatch(50, nextAttemptAt.minusMillis(1)))
+                .extracting(OutboxEvent::id)
+                .doesNotContain(event.id());
+        assertThat(outboxEventPersistenceAdapter.findDueBatch(50, nextAttemptAt))
+                .extracting(OutboxEvent::id)
+                .contains(event.id());
+        assertThat(outboxEventPersistenceAdapter.findDueBatch(50, nextAttemptAt.plus(Duration.ofHours(1))))
+                .extracting(OutboxEvent::id)
+                .contains(event.id());
+    }
+
+    /**
+     * The behavioural change this whole migration exists for: {@code FAILED} is no longer
+     * terminal. The relay's query must keep handing those rows back once they are due, otherwise
+     * a degraded event silently stops being retried and needs a human after all.
+     */
+    @Test
+    void aFailedEventIsStillReturnedToTheRelayOnceItIsDue_failedIsNotTerminal() {
+        Instant failedAt = Instant.parse("2025-08-02T10:00:00Z");
+        OutboxEvent event = OutboxEvent.record("Order", "order-" + UUID.randomUUID(), "OrderCreated",
+                "{\"k\":\"v\"}", Instant.parse("2025-08-02T09:59:00Z"));
+        for (int attempt = 0; attempt < OutboxEvent.MAX_PUBLISH_ATTEMPTS; attempt++) {
+            event.recordFailedAttempt(failedAt);
+        }
+        assertThat(event.status()).isEqualTo(OutboxStatus.FAILED);
+
+        transactionRunner.run(() -> outboxEventPersistenceAdapter.save(event));
+
+        List<OutboxEvent> due = outboxEventPersistenceAdapter.findDueBatch(50, event.nextAttemptAt());
+        assertThat(due).extracting(OutboxEvent::id).contains(event.id());
+        assertThat(due)
+                .filteredOn(candidate -> candidate.id().equals(event.id()))
+                .singleElement()
+                .satisfies(reloaded -> {
+                    assertThat(reloaded.status()).isEqualTo(OutboxStatus.FAILED);
+                    assertThat(reloaded.publishAttempts()).isEqualTo(OutboxEvent.MAX_PUBLISH_ATTEMPTS);
+                    assertThat(reloaded.nextAttemptAt()).isEqualTo(event.nextAttemptAt());
+                });
+    }
+
+    @Test
+    void aPublishedEventIsNeverReturnedToTheRelay_howeverLongAgoItWasDue() {
+        OutboxEvent event = OutboxEvent.record("Order", "order-" + UUID.randomUUID(), "OrderCreated",
+                "{\"k\":\"v\"}", Instant.parse("2025-08-03T09:59:00Z"));
+        event.recordFailedAttempt(Instant.parse("2025-08-03T10:00:00Z"));
+        event.markPublished(Instant.parse("2025-08-03T10:00:30Z"));
+
+        transactionRunner.run(() -> outboxEventPersistenceAdapter.save(event));
+
+        assertThat(outboxEventPersistenceAdapter.findDueBatch(50, Instant.parse("2025-12-01T00:00:00Z")))
+                .extracting(OutboxEvent::id)
+                .doesNotContain(event.id());
+    }
+
+    @Test
+    void dueEventsComeBackOldestFirst_realOrderByAgainstPostgres() {
+        Instant now = Instant.parse("2025-08-04T12:00:00Z");
+        OutboxEvent older = OutboxEvent.record("Order", "order-due-older", "OrderCreated", "{}",
+                Instant.parse("2025-08-04T10:00:00Z"));
+        OutboxEvent newer = OutboxEvent.record("Order", "order-due-newer", "OrderCreated", "{}",
+                Instant.parse("2025-08-04T11:00:00Z"));
+
+        transactionRunner.run(() -> {
+            outboxEventPersistenceAdapter.save(newer);
+            outboxEventPersistenceAdapter.save(older);
+        });
+
+        List<OutboxEvent> due = outboxEventPersistenceAdapter.findDueBatch(50, now);
+        assertThat(due).extracting(OutboxEvent::aggregateId)
+                .filteredOn(aggregateId -> aggregateId.startsWith("order-due-"))
+                .containsExactly("order-due-older", "order-due-newer");
     }
 
     @Test
@@ -90,7 +180,7 @@ class OrderPersistenceAdapterIT {
         // Real proof of atomicity: read back through a brand-new call (new transaction/read),
         // against the real Postgres container — not an in-memory fake that can't lie about this.
         assertThat(orderPersistenceAdapter.findById(order.id())).isEmpty();
-        assertThat(outboxEventPersistenceAdapter.findPendingBatch(50))
+        assertThat(outboxEventPersistenceAdapter.findDueBatch(50, Instant.now(FIXED_CLOCK)))
                 .extracting(OutboxEvent::id)
                 .doesNotContain(outboxEvent.id());
     }
@@ -137,7 +227,7 @@ class OrderPersistenceAdapterIT {
 
         List<OutboxEvent> recent = outboxEventPersistenceAdapter.findRecent(2);
 
-        // Unlike findPendingBatch, the query port has to surface already-PUBLISHED rows too —
+        // Unlike findDueBatch, the query port has to surface already-PUBLISHED rows too —
         // that is the whole point of the dashboard's outbox column.
         assertThat(recent).extracting(OutboxEvent::id).containsExactly(pending.id(), published.id());
         assertThat(recent.get(0).status()).isEqualTo(OutboxStatus.PENDING);
@@ -145,6 +235,7 @@ class OrderPersistenceAdapterIT {
         assertThat(recent.get(1).status()).isEqualTo(OutboxStatus.PUBLISHED);
         assertThat(recent.get(1).publishedAt()).isEqualTo(Instant.parse("2026-06-01T10:00:03Z"));
         assertThat(recent.get(1).publishAttempts()).isZero();
+        assertThat(recent.get(1).nextAttemptAt()).isNull();
     }
 
     private static Order orderPlacedAt(String productId, String createdAt) {

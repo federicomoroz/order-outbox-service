@@ -25,6 +25,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class OutboxControllerTest {
 
+    private static final Instant FAILED_AT = Instant.parse("2026-01-01T10:00:01Z");
+
     private final InMemoryOutboxRepository outbox = new InMemoryOutboxRepository();
 
     private final MockMvc mockMvc = MockMvcBuilders
@@ -48,7 +50,9 @@ class OutboxControllerTest {
                 .andExpect(jsonPath("$[0].status").value("PENDING"))
                 .andExpect(jsonPath("$[0].publishAttempts").value(0))
                 .andExpect(jsonPath("$[0].occurredAt").value("2026-01-01T10:00:00Z"))
-                .andExpect(jsonPath("$[0].publishedAt").isEmpty());
+                .andExpect(jsonPath("$[0].publishedAt").isEmpty())
+                // Never attempted: no backoff owed, so the relay may take it on its next poll.
+                .andExpect(jsonPath("$[0].nextAttemptAt").isEmpty());
 
         event.markPublished(Instant.parse("2026-01-01T10:00:02Z"));
         outbox.save(event);
@@ -57,21 +61,28 @@ class OutboxControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(1))
                 .andExpect(jsonPath("$[0].status").value("PUBLISHED"))
-                .andExpect(jsonPath("$[0].publishedAt").value("2026-01-01T10:00:02Z"));
+                .andExpect(jsonPath("$[0].publishedAt").value("2026-01-01T10:00:02Z"))
+                .andExpect(jsonPath("$[0].nextAttemptAt").isEmpty());
     }
 
+    /**
+     * A {@code FAILED} row has to look self-healing over the wire, not abandoned: the response
+     * carries the instant the relay will come back for it. Without {@code nextAttemptAt} the
+     * dashboard could only paint the row red and imply a human is needed.
+     */
     @Test
-    void reportsFailedEventsWithTheirAttemptCount() throws Exception {
+    void reportsFailedEventsWithTheirAttemptCountAndTheirScheduledRetry() throws Exception {
         OutboxEvent event = eventRecordedAt("2026-01-01T10:00:00Z");
         for (int i = 0; i < OutboxEvent.MAX_PUBLISH_ATTEMPTS; i++) {
-            event.recordFailedAttempt();
+            event.recordFailedAttempt(FAILED_AT);
         }
         outbox.save(event);
 
         mockMvc.perform(get("/api/outbox"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].status").value("FAILED"))
-                .andExpect(jsonPath("$[0].publishAttempts").value(OutboxEvent.MAX_PUBLISH_ATTEMPTS));
+                .andExpect(jsonPath("$[0].publishAttempts").value(OutboxEvent.MAX_PUBLISH_ATTEMPTS))
+                .andExpect(jsonPath("$[0].nextAttemptAt").value(event.nextAttemptAt().toString()));
     }
 
     @Test

@@ -44,12 +44,17 @@ class OutboxEventJpaEntity {
     @Column(name = "published_at")
     private Instant publishedAt;
 
+    // Nullable on purpose: NULL means "due now" (never attempted, or predating V3).
+    @Column(name = "next_attempt_at")
+    private Instant nextAttemptAt;
+
     protected OutboxEventJpaEntity() {
         // required by JPA
     }
 
     OutboxEventJpaEntity(UUID id, String aggregateType, String aggregateId, String eventType, String payload,
-                          String status, Instant occurredAt, int publishAttempts, Instant publishedAt) {
+                          String status, Instant occurredAt, int publishAttempts, Instant publishedAt,
+                          Instant nextAttemptAt) {
         this.id = id;
         this.aggregateType = aggregateType;
         this.aggregateId = aggregateId;
@@ -59,6 +64,7 @@ class OutboxEventJpaEntity {
         this.occurredAt = occurredAt;
         this.publishAttempts = publishAttempts;
         this.publishedAt = publishedAt;
+        this.nextAttemptAt = nextAttemptAt;
     }
 
     UUID getId() {
@@ -95,5 +101,9 @@ class OutboxEventJpaEntity {
 
     Instant getPublishedAt() {
         return publishedAt;
+    }
+
+    Instant getNextAttemptAt() {
+        return nextAttemptAt;
     }
 }

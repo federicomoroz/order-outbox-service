@@ -20,7 +20,7 @@ public class OutboxRelayScheduler {
 
     @Scheduled(fixedDelayString = "${outbox.relay.poll-interval-ms:2000}")
     public void relay() {
-        RelayOutcome outcome = relayOutboxEventsUseCase.relayPendingEvents();
+        RelayOutcome outcome = relayOutboxEventsUseCase.relayDueEvents();
         if (outcome.publishedCount() > 0 || outcome.failedCount() > 0 || outcome.retriedCount() > 0) {
             log.info("Outbox relay run: published={}, retried={}, failed={}",
                     outcome.publishedCount(), outcome.retriedCount(), outcome.failedCount());

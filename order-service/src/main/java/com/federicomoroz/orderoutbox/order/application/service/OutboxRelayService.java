@@ -19,6 +19,11 @@ import java.util.List;
  * persisted in its own short, separate transaction. That means if event #3 in a batch fails,
  * events #1 and #2 — already marked {@code PUBLISHED} in their own committed transactions — are
  * not rolled back.
+ *
+ * <p>This service decides <em>nothing</em> about retries. It asks the repository which events are
+ * due at this instant, publishes them, and tells each {@link OutboxEvent} how it went; the event
+ * itself works out its new status and when it may be tried again. So "no event is ever abandoned"
+ * is a property of the domain model, not of a scheduling loop that could be rewritten around it.
  */
 public final class OutboxRelayService implements RelayOutboxEventsUseCase {
 
@@ -38,14 +43,14 @@ public final class OutboxRelayService implements RelayOutboxEventsUseCase {
     }
 
     @Override
-    public RelayOutcome relayPendingEvents() {
-        List<OutboxEvent> pending = outboxRepository.findPendingBatch(RELAY_BATCH_SIZE);
+    public RelayOutcome relayDueEvents() {
+        List<OutboxEvent> due = outboxRepository.findDueBatch(RELAY_BATCH_SIZE, Instant.now(clock));
 
         int publishedCount = 0;
         int failedCount = 0;
         int retriedCount = 0;
 
-        for (OutboxEvent event : pending) {
+        for (OutboxEvent event : due) {
             if (publishOne(event)) {
                 publishedCount++;
             } else if (event.status() == OutboxStatus.FAILED) {
@@ -66,7 +71,9 @@ public final class OutboxRelayService implements RelayOutboxEventsUseCase {
             transactionRunner.run(() -> outboxRepository.save(event));
             return true;
         } catch (RuntimeException publishFailure) {
-            event.recordFailedAttempt();
+            // Read the clock again rather than reusing the batch's instant: the publish attempt
+            // itself can take seconds, and the backoff window starts when it actually failed.
+            event.recordFailedAttempt(Instant.now(clock));
             transactionRunner.run(() -> outboxRepository.save(event));
             return false;
         }

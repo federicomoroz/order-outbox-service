@@ -21,7 +21,8 @@ final class OutboxEventMapper {
                 event.status().name(),
                 event.occurredAt(),
                 event.publishAttempts(),
-                event.publishedAt());
+                event.publishedAt(),
+                event.nextAttemptAt());
     }
 
     static OutboxEvent toDomain(OutboxEventJpaEntity entity) {
@@ -34,6 +35,7 @@ final class OutboxEventMapper {
                 entity.getOccurredAt(),
                 OutboxStatus.valueOf(entity.getStatus()),
                 entity.getPublishAttempts(),
-                entity.getPublishedAt());
+                entity.getPublishedAt(),
+                entity.getNextAttemptAt());
     }
 }
