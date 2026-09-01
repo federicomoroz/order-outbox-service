@@ -20,7 +20,19 @@ spring:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       properties:
+        # Un solo deadline manda, y es el del propio productor: pasados estos 8s el cliente deja
+        # de reintentar por debajo y falla el Future. Sin esto el default son 120s, y el relay
+        # daba por perdido a los 5s un send() que el cliente terminaba entregando despues.
+        # Ver el javadoc de KafkaEventPublisher.
+        delivery.timeout.ms: 8000
+        # Kafka exige request.timeout.ms + linger.ms <= delivery.timeout.ms (linger.ms = 0 aca).
+        request.timeout.ms: 4000
+        # Cuanto bloquea send() esperando metadata cuando el broker no responde.
         max.block.ms: 5000
+        # Ya es el default del cliente desde Kafka 3.0 (KIP-679); se deja explicito para que un
+        # downgrade o un override no lo apague en silencio: sin idempotencia, los reintentos
+        # internos del productor pueden escribir copias del mismo mensaje en el topic.
+        enable.idempotence: true
 
 management:
   endpoints:
@@ -34,7 +46,11 @@ management:
 outbox:
   relay:
     poll-interval-ms: 2000
-    publish-timeout-ms: 5000
+    # Red de seguridad LOCAL, no la politica de reintentos: tiene que ser estrictamente mayor
+    # que delivery.timeout.ms para que el veredicto del productor llegue siempre primero. Si
+    # este timeout salta, no es impaciencia del relay: es que el productor se colgo.
+    # KafkaEventPublisher falla al arrancar si la relacion se rompe.
+    publish-timeout-ms: 10000
 
 # Origenes del navegador autorizados a llamar /api/** (el dashboard React).
 # Override en despliegue: WEB_CORS_ALLOWED_ORIGINS
