@@ -24,6 +24,8 @@ export interface OutboxEventDto {
   publishAttempts: number;
   occurredAt: string;
   publishedAt: string | null;
+  /** Cuando el relay vuelve a intentar. `null` = ya publicado, o le toca en el proximo poll. */
+  nextAttemptAt: string | null;
 }
 
 /** `GET /api/notifications` — notification-service (:8007), otra base de datos. */

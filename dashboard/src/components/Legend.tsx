@@ -15,7 +15,8 @@ export function Legend(): React.JSX.Element {
         </span>
         <span className="legend__item">
           <span className="legend__swatch legend__swatch--red" aria-hidden="true" />
-          <strong>FAILED</strong> — agotó los reintentos del relay; no implica evento perdido
+          <strong>FAILED</strong> — agotó los reintentos rápidos; el relay lo sigue reintentando
+          con backoff, no está abandonado
         </span>
       </div>
 

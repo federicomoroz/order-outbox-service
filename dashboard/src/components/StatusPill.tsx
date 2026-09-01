@@ -2,8 +2,8 @@ import type { OutboxStatus } from '../types';
 
 /**
  * El color aca es semantico, no decorativo: ambar = en el outbox esperando relay,
- * verde = confirmado por Kafka, rojo = agoto los reintentos. Es el unico lugar del panel donde
- * se usan los tres acentos juntos.
+ * verde = confirmado por Kafka, rojo = degradado (agoto los reintentos rapidos, pero el relay
+ * sigue volviendo por el). Es el unico lugar del panel donde se usan los tres acentos juntos.
  */
 export function StatusPill({ status }: { status: OutboxStatus }): React.JSX.Element {
   return (

@@ -82,7 +82,8 @@ export default function App(): React.JSX.Element {
     {
       label: 'Outbox FAILED',
       value: String(failed),
-      hint: failed > 0 ? 'revisar manualmente' : 'sin eventos agotados',
+      // FAILED dejo de significar "abandonado": la fila se sigue reintentando sola con backoff.
+      hint: failed > 0 ? 'degradado, sigue reintentando' : 'sin eventos degradados',
       tone: failed > 0 ? 'red' : 'neutral',
     },
     {
@@ -144,7 +145,7 @@ export default function App(): React.JSX.Element {
             emptyMessage="El outbox está vacío."
           >
             {outboxEvents.map((event) => (
-              <OutboxRow key={event.id} event={event} flash={outboxFlashes[event.id]} />
+              <OutboxRow key={event.id} event={event} flash={outboxFlashes[event.id]} now={now} />
             ))}
           </StageColumn>
 

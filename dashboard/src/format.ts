@@ -28,6 +28,23 @@ export function formatRelative(iso: string | null | undefined, now: number): str
   return `hace ${Math.floor(minutes / 60)}h`;
 }
 
+/**
+ * `en 12s` / `en 3m` — cuanto falta para el proximo intento del relay, o `null` si ya le toca.
+ *
+ * Devolver `null` en vez de "0s" es deliberado: una fila que ya esta vencida no tiene nada que
+ * anunciar, la va a levantar el proximo poll del relay y punto.
+ */
+export function formatCountdown(iso: string | null | undefined, now: number): string | null {
+  if (!iso) return null;
+  const timestamp = new Date(iso).getTime();
+  if (Number.isNaN(timestamp)) return null;
+
+  const seconds = Math.ceil((timestamp - now) / 1000);
+  if (seconds <= 0) return null;
+  if (seconds < 60) return `en ${seconds}s`;
+  return `en ${Math.ceil(seconds / 60)}m`;
+}
+
 /** Diferencia en milisegundos entre dos instantes ISO, o `null` si falta alguno. */
 export function elapsedMs(fromIso: string | null | undefined, toIso: string | null | undefined): number | null {
   if (!fromIso || !toIso) return null;

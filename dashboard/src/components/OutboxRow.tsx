@@ -1,4 +1,4 @@
-import { elapsedMs, formatClock, formatDuration, shortId } from '../format';
+import { elapsedMs, formatClock, formatCountdown, formatDuration, shortId } from '../format';
 import type { FlashKind } from '../hooks/useRowFlash';
 import type { OutboxEventDto } from '../types';
 import { StatusPill } from './StatusPill';
@@ -6,6 +6,8 @@ import { StatusPill } from './StatusPill';
 interface OutboxRowProps {
   event: OutboxEventDto;
   flash: FlashKind | undefined;
+  /** `Date.now()` del render, para la cuenta regresiva hasta el proximo intento. */
+  now: number;
 }
 
 const ACCENT_BY_STATUS = {
@@ -18,9 +20,14 @@ const ACCENT_BY_STATUS = {
  * La fila mas importante del panel: es la unica vista donde la garantia del patron se ve en
  * lugar de leerse. Muestra el ciclo completo de una fila del outbox — cuando se escribio,
  * cuantas veces se intento publicarla y cuando Kafka la confirmo.
+ *
+ * Una fila roja tiene que leerse como "degradada, se esta reintentando sola", no como "muerta":
+ * por eso el rojo viene acompanado de la cuenta regresiva al proximo intento. Sin ese dato, el
+ * unico mensaje posible seria "revisar a mano" — que es justo lo que dejo de ser cierto.
  */
-export function OutboxRow({ event, flash }: OutboxRowProps): React.JSX.Element {
+export function OutboxRow({ event, flash, now }: OutboxRowProps): React.JSX.Element {
   const latency = elapsedMs(event.occurredAt, event.publishedAt);
+  const retryIn = formatCountdown(event.nextAttemptAt, now);
 
   return (
     <li
@@ -53,10 +60,27 @@ export function OutboxRow({ event, flash }: OutboxRowProps): React.JSX.Element {
           </>
         )}
 
-        {event.status === 'PENDING' && <span className="row__note">esperando al relay…</span>}
+        {event.status === 'PENDING' &&
+          (retryIn ? (
+            <span className="row__retry num" title="Backoff exponencial tras un intento fallido">
+              reintenta {retryIn}
+            </span>
+          ) : (
+            <span className="row__note">esperando al relay…</span>
+          ))}
 
         {event.status === 'FAILED' && (
-          <span className="row__note row__note--error">sin publicar — revisar manualmente</span>
+          <>
+            <span className="row__note row__note--error">degradado — el relay sigue reintentando</span>
+            {retryIn && (
+              <span
+                className="row__retry num"
+                title="Backoff exponencial, con tope: el evento nunca se abandona"
+              >
+                reintenta {retryIn}
+              </span>
+            )}
+          </>
         )}
       </div>
     </li>

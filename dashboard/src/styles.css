@@ -718,6 +718,16 @@ select {
   font-weight: 500;
 }
 
+/*
+ * La cuenta regresiva al proximo intento. Comparte el ambar de `row__attempts` a proposito: en
+ * una fila roja es lo unico que dice "esto se esta recuperando solo", asi que tiene que leerse
+ * como actividad pendiente y no como parte del error.
+ */
+.row__retry {
+  color: var(--amber);
+  font-weight: 500;
+}
+
 .row__note {
   color: var(--text-4);
   font-style: italic;
