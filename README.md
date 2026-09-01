@@ -1,5 +1,7 @@
 # order-outbox-service
 
+[![tests](https://github.com/federicomoroz/order-outbox-service/actions/workflows/tests.yml/badge.svg)](https://github.com/federicomoroz/order-outbox-service/actions/workflows/tests.yml)
+
 Dos microservicios Java/Spring Boot (`order-service` + `notification-service`) que resuelven un problema clásico de arquitectura de eventos: **cómo no perder un evento cuando el broker está caído justo en el momento de hacer commit de la transacción de base de datos** (el "dual write problem"). Implementa el patrón **Transactional Outbox** en el productor y **Idempotent Consumer** en el consumidor, con Kafka como broker y Postgres como base de datos (una por servicio).
 
 Pieza de portfolio pensada para demostrar experiencia Java/Spring Boot con rigor de arquitectura hexagonal — el resto del portfolio es Python/FastAPI.
