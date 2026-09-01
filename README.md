@@ -4,11 +4,13 @@
 
 Dos microservicios Java/Spring Boot (`order-service` + `notification-service`) que resuelven un problema clásico de arquitectura de eventos: **cómo no perder un evento cuando el broker está caído justo en el momento de hacer commit de la transacción de base de datos** (el "dual write problem"). Implementa el patrón **Transactional Outbox** en el productor y **Idempotent Consumer** en el consumidor, con Kafka como broker y Postgres como base de datos (una por servicio).
 
+Incluye un **panel de observabilidad en React** (`:8008`) que muestra el circuito completo en vivo: una orden entrando, su fila de outbox pasando de `PENDING` a `PUBLISHED`, y la notificación aterrizando en la base de datos del *otro* servicio — exactamente una vez.
+
 Pieza de portfolio pensada para demostrar experiencia Java/Spring Boot con rigor de arquitectura hexagonal — el resto del portfolio es Python/FastAPI.
 
 ## Live Demo
 
-No aplica en esta iteración. El stack (2 Postgres + Kafka + 2 servicios) no corre cómodo en el free tier de ningún proveedor cloud gratuito; ver "Cloud Deploy" más abajo.
+No aplica en esta iteración. El stack (2 Postgres + Kafka + 2 servicios + panel) no corre cómodo en el free tier de ningún proveedor cloud gratuito; ver "Cloud Deploy" más abajo. Localmente, `docker compose up --build` y **http://localhost:8008** dan la demo completa.
 
 ## Run locally
 
@@ -24,12 +26,45 @@ Levanta, en orden de dependencias reales (no solo declaradas):
 2. `kafka` (KRaft, un solo nodo, sin Zookeeper) — sano cuando `kafka-broker-api-versions` responde.
 3. `kafka-init` — job de un solo uso que crea el topic `order.created.v1` y termina.
 4. `order-service` (8006) y `notification-service` (8007) — arrancan recién cuando su Postgres está healthy y `kafka-init` terminó con éxito.
+5. `dashboard` (8008) — el panel React servido por nginx; arranca último, cuando los dos servicios están healthy.
 
-Los healthchecks HTTP de ambos servicios pegan a `/actuator/health`.
+Los healthchecks HTTP de ambos servicios pegan a `/actuator/health`; el del dashboard, a `/`.
 
-Para correrlo sin Docker (desarrollo local): instalar JDK 21 y Maven, levantar Postgres y Kafka a mano, y ajustar `application.yml` de cada módulo (o pasar las mismas variables de entorno que usa `docker-compose.yml`).
+Con todo arriba, **abrir http://localhost:8008** — ahí se ve el circuito completo en vivo y se pueden crear órdenes sin salir del navegador.
+
+Para correrlo sin Docker (desarrollo local): instalar JDK 21 y Maven, levantar Postgres y Kafka a mano, y ajustar `application.yml` de cada módulo (o pasar las mismas variables de entorno que usa `docker-compose.yml`). El dashboard solo necesita Node 20.19+ / 22.12+:
+
+```bash
+cd dashboard
+npm install
+npm run dev     # http://localhost:5173, ya contemplado en la lista de orígenes CORS
+```
 
 ## User Guide
+
+### El panel (http://localhost:8008)
+
+La forma corta de entender el sistema es mirarlo funcionar. El panel muestra tres columnas — **Órdenes → Outbox → Notificaciones** — que son literalmente tres tablas de **dos bases de datos distintas**, y refresca cada segundo:
+
+```
+┌──────────────┐   misma       ┌──────────────┐   relay 2s →   ┌──────────────────┐
+│   Órdenes    │  transacción  │    Outbox    │     Kafka      │  Notificaciones  │
+│ postgres-    │ ────────────▶ │ PENDING ───▶ │ ─────────────▶ │  postgres-       │
+│  orders      │               │  PUBLISHED   │                │  notifications   │
+└──────────────┘               └──────────────┘                └──────────────────┘
+        order-service (:8006)                          notification-service (:8007)
+```
+
+El botón **Crear orden** (o **ráfaga ×5**) hace el mismo `POST /api/orders` que el `curl` de abajo. A partir de ahí se ve, sin tocar la terminal:
+
+- la fila aparecer en el outbox como `PENDING`, con `publishedAt` vacío;
+- esa misma fila pasar a `PUBLISHED` un par de segundos después, con la latencia real `commit → ack` calculada;
+- la notificación aparecer en la columna 3 — que sale de la base del **otro** servicio — exactamente una vez;
+- si algún evento agotó los reintentos, la fila queda `FAILED` en rojo con su contador de intentos.
+
+Todo lo que sigue en esta sección es el mismo circuito hecho a mano.
+
+### A mano, con curl
 
 Crear una orden:
 
@@ -47,7 +82,13 @@ curl -i -X POST http://localhost:8006/api/orders \
 
 Responde `201 Created` con `Location` apuntando a `GET /api/orders/{id}` — y esto pasa **sin tocar Kafka para nada**: la orden y su evento en el outbox se escriben en una sola transacción de Postgres, el publish a Kafka lo hace el relay unos segundos después, de forma asincrónica.
 
-Ver el estado del outbox directamente (solo para entender el flujo — no es un endpoint público, es una consulta a la base):
+Ver el estado del outbox (lo mismo que consume la columna del medio del panel):
+
+```bash
+curl http://localhost:8006/api/outbox
+```
+
+O directamente contra la base, si se quiere confirmar que el endpoint no está inventando nada:
 
 ```bash
 docker exec -it order-outbox-service-postgres-orders-1 \
@@ -72,6 +113,12 @@ A los ~2 segundos de crear la orden (el relay pollea cada `outbox.relay.poll-int
 
 - **`docker compose up` se queda esperando y `kafka` nunca pasa a healthy**: la primera vez que arranca KRaft puede tardar 20-30s en formatear su storage. `docker compose logs kafka` para ver el progreso; el healthcheck tiene `start_period: 20s` y `retries: 10` para darle margen.
 - **`order-service`/`notification-service` no arrancan ("Schema-validation" en el log)**: significa que Flyway no corrió o corrió parcial. Con `ddl-auto: validate`, Hibernate nunca crea ni corrige el schema — si las migraciones no corrieron, falla rápido y ruidoso en vez de generar un schema silenciosamente distinto al versionado. `docker compose logs order-service` muestra el error exacto de Flyway.
+- **El panel carga pero las tres columnas quedan vacías y los chips del header dicen "sin respuesta"**: es CORS, no los servicios. La consola del navegador lo dice explícitamente ("blocked by CORS policy"). Pasa cuando el panel se abre desde un origen que no está en `WEB_CORS_ALLOWED_ORIGINS` — por ejemplo entrando por IP de LAN (`http://192.168.x.x:8008`) en vez de `http://localhost:8008`. Un origen no autorizado recibe `403`, verificable sin navegador:
+  ```bash
+  curl -s -o /dev/null -w "%{http_code}\n" -H "Origin: http://otro.host" http://localhost:8006/api/outbox   # 403
+  curl -s -o /dev/null -w "%{http_code}\n" -H "Origin: http://localhost:8008" http://localhost:8006/api/outbox  # 200
+  ```
+- **Cambié `VITE_ORDER_API_URL` y el panel sigue pegándole a `localhost`**: son variables de *build*, no de runtime. `docker compose restart dashboard` no alcanza; hace falta `docker compose up -d --build dashboard` para recompilar el bundle.
 - **El outbox de una orden queda en `FAILED` después de un blip de Kafka, pero la notificación de esa orden existe igual**: esto pasó de verdad durante la verificación de este mismo repo (ver más abajo) y **no es un bug** — es una consecuencia honesta de que el relay usa *at-least-once* con reintentos acotados por tiempo, no un productor transaccional. Detalle completo abajo.
 
 ### El caso real: outbox `FAILED` con notificación igual creada
@@ -143,27 +190,40 @@ Del lado del consumidor aparece el problema espejado: si el broker reentrega un 
 ├──────────────────────────┤                                  ├────────────────────────────┤
 │ adapter/in/web              │                                  │ adapter/in/messaging          │
 │  OrderController             │                                  │  OrderCreatedEventConsumer     │
-│ adapter/in/scheduling        │                                  │ adapter/in/web                │
-│  OutboxRelayScheduler         │                                  │  NotificationController        │
-│                              │                                  │                              │
-│ application/service          │                                  │ application/service            │
-│  CreateOrderService           │                                  │  HandleOrderCreatedEventService │
-│  GetOrderService               │                                  │                              │
-│  OutboxRelayService            │                                  │ adapter/out/persistence        │
-│                              │                                  │  NotificationPersistenceAdapter │
-│ adapter/out/persistence       │                                  │  ProcessedEventPersistenceAdapter│
-│  OrderPersistenceAdapter       │                                  │                              │
-│  OutboxEventPersistenceAdapter │                                  └──────────────┬───────────────┘
-│ adapter/out/messaging          │                                                 │
-│  KafkaEventPublisher            │                                                 ▼
-└──────────────┬───────────────┘                                  ┌────────────────────────────┐
-               │                                                  │  postgres-notifications      │
-               ▼                                                  │  (notifications,             │
-┌────────────────────────────┐                                  │   processed_events)           │
-│      postgres-orders          │                                  └────────────────────────────┘
+│  OutboxController            │                                  │ adapter/in/web                │
+│ adapter/in/scheduling        │                                  │  NotificationController        │
+│  OutboxRelayScheduler         │                                  │                              │
+│                              │                                  │ application/service            │
+│ application/service          │                                  │  HandleOrderCreatedEventService │
+│  CreateOrderService           │                                  │                              │
+│  GetOrderService               │                                  │ adapter/out/persistence        │
+│  OutboxRelayService            │                                  │  NotificationPersistenceAdapter │
+│                              │                                  │  ProcessedEventPersistenceAdapter│
+│ adapter/out/persistence       │                                  │                              │
+│  OrderPersistenceAdapter       │                                  └──────────────┬───────────────┘
+│  OutboxEventPersistenceAdapter │                                                 │
+│ adapter/out/messaging          │                                                 ▼
+│  KafkaEventPublisher            │                                  ┌────────────────────────────┐
+└──────────────┬───────────────┘                                  │  postgres-notifications      │
+               │                                                  │  (notifications,             │
+               ▼                                                  │   processed_events)           │
+┌────────────────────────────┐                                  └────────────────────────────┘
+│      postgres-orders          │
 │  (orders, outbox_events)       │
 └────────────────────────────┘
+
+                    ┌──────────────────────────────────────────┐
+                    │        dashboard (:8008, nginx)           │
+                    │   React + Vite — cliente del navegador     │
+                    ├──────────────────────────────────────────┤
+   GET /api/orders  │  Órdenes  →  Outbox  →  Notificaciones     │  GET /api/notifications
+   GET /api/outbox  │   (col 1)    (col 2)      (col 3)          │
+   ◀────────────────┤  POST /api/orders (crear tráfico)          ├────────────────▶
+      :8006         │  polling cada 1s, sin estado propio        │      :8007
+                    └──────────────────────────────────────────┘
 ```
+
+El dashboard es un **cliente HTTP más**, no un servicio del backend: corre entero en el navegador, no habla con Postgres ni con Kafka, y no guarda nada. Consulta las dos APIs por separado a propósito — que la tercera columna venga de `:8007` y no de un proxy en `:8006` es justamente lo que demuestra que el evento cruzó el límite entre servicios.
 
 ## Full Request Lifecycle
 
@@ -239,7 +299,7 @@ OrderController ──▶ CreateOrderUseCase (CreateOrderService)
 ```
 order-outbox-service/
 ├── pom.xml                          # reactor: packaging=pom, testcontainers-bom, archunit
-├── docker-compose.yml                # postgres×2 + kafka (KRaft) + kafka-init + ambos servicios
+├── docker-compose.yml                # postgres×2 + kafka (KRaft) + kafka-init + 2 servicios + dashboard
 ├── .github/workflows/tests.yml       # mvn -B verify en cada push/PR
 │
 ├── order-service/
@@ -251,13 +311,15 @@ order-outbox-service/
 │       │   ├── port/in/              # CreateOrderUseCase, GetOrderUseCase, RelayOutboxEventsUseCase
 │       │   ├── port/out/             # OrderRepository, OutboxRepository, EventSerializer,
 │       │   │                         # EventPublisherPort, TransactionRunner
+│       │   │                         # + OrderQueryPort, OutboxQueryPort (solo lectura, ver ISP)
 │       │   └── service/              # CreateOrderService, GetOrderService, OutboxRelayService
 │       ├── adapter/
-│       │   ├── in/web/               # OrderController, GlobalExceptionHandler
+│       │   ├── in/web/               # OrderController, OutboxController, GlobalExceptionHandler
 │       │   ├── in/scheduling/        # OutboxRelayScheduler
 │       │   ├── out/persistence/      # JPA entities + mappers + *PersistenceAdapter + SpringTransactionRunner
 │       │   └── out/messaging/        # KafkaEventPublisher, JacksonEventSerializer, KafkaTopics
 │       └── config/                   # OrderServiceBeanConfiguration (composition root)
+│                                     # + WebCorsConfiguration (orígenes del dashboard)
 │
 ├── notification-service/
 │   ├── Dockerfile
@@ -269,6 +331,22 @@ order-outbox-service/
 │       │   ├── in/web/               # NotificationController (solo lectura, verificación manual)
 │       │   └── out/persistence/      # incluye el INSERT ... ON CONFLICT DO NOTHING de tryMarkProcessed
 │       └── config/                   # NotificationServiceBeanConfiguration + KafkaErrorHandlingConfiguration
+│                                     # + WebCorsConfiguration (solo GET)
+│
+├── dashboard/                        # panel de observabilidad (React + Vite + TypeScript)
+│   ├── Dockerfile                    # multi-stage: node:22-alpine → nginx:alpine, expone 8008
+│   ├── nginx.conf                    # listen 8008, fallback SPA, cache de /assets con hash
+│   ├── .env.example                  # VITE_ORDER_API_URL / VITE_NOTIFICATION_API_URL
+│   └── src/
+│       ├── config.ts                 # URLs por env var, intervalo de polling, topic
+│       ├── api.ts                    # los 3 GET + el POST, con ApiError tipado
+│       ├── types.ts                  # DTOs espejo de los records Java
+│       ├── format.ts                 # horas, latencias, mediana — nada de lógica de negocio
+│       ├── hooks/useCircuit.ts       # un solo setInterval → Promise.allSettled sobre los 3 endpoints
+│       ├── hooks/useRowFlash.ts      # detecta qué filas cambiaron entre polls (el resaltado)
+│       ├── components/               # AppHeader, MetricsBar, CreateOrderPanel, StageColumn,
+│       │                             # FlowConnector, StatusPill, *Row, Legend
+│       └── styles.css                # tema oscuro; el color es semántico, no decorativo
 │
 └── (cada módulo) src/test/java/.../architecture/HexagonalArchitectureTest.java   # 5 reglas ArchUnit
 ```
@@ -280,6 +358,7 @@ order-outbox-service/
 - **Ports & Adapters (hexagonal)**: `domain/` y `application/` no importan Spring, JPA ni Hibernate — verificado por ArchUnit, no solo por convención. Los adaptadores (`adapter/in/*`, `adapter/out/*`) son el único lugar donde el framework existe.
 - **Composition Root**: `OrderServiceBeanConfiguration`/`NotificationServiceBeanConfiguration` son el único punto donde las clases Java puras de `application/service` se instancian y se conectan a sus adaptadores Spring — mismo criterio que `task-queue`.
 - **Repository**: `OrderRepository`, `OutboxRepository`, `NotificationRepository`, `ProcessedEventRepository` — puertos de salida con una sola implementación JPA cada uno, pero declarados como interfaz para que `application/` dependa de una abstracción, no de Hibernate.
+- **CQRS-lite**: el camino de escritura pasa por casos de uso (`port/in`); las lecturas del panel van derecho por puertos de consulta separados (`OrderQueryPort`, `OutboxQueryPort`) implementados por los mismos adaptadores JPA. Separar la lectura de la escritura *a nivel de puerto* — no de base de datos ni de proceso — es lo que evita que el relay y el panel se estorben mutuamente. Ver "Decisiones puntuales".
 
 ## Decisiones puntuales
 
@@ -287,6 +366,10 @@ order-outbox-service/
 - **¿Por qué no hay un DTO compartido entre los dos servicios?** Un JAR común con el contrato del evento es el antipatrón "monolito distribuido": cualquier cambio de forma obliga a versionar y desplegar ambos servicios juntos, exactamente lo que microservicios independientes deberían evitar. Cada servicio define su propio `OrderCreatedEvent`/`OrderCreatedEventPayload`. El costo real de esto — que las dos copias puedan divergir sin que el compilador avise — se mitiga con fixtures de test espejadas en ambos módulos, no con código compartido.
 - **¿Por qué dos Postgres separados?** Cada servicio es dueño de su propia base — nadie hace joins cross-servicio ni depende del schema interno del otro. Es la regla "database per service" tomada en serio, no solo declarada.
 - **¿Por qué el publish a Kafka es bloqueante (`.get(timeoutMs)`)?** Porque corre en el scheduler del relay, no en el hilo de un request HTTP. No hay nadie esperando ese hilo — la simplicidad de saber inmediatamente si el publish tuvo éxito vale más que el throughput que se ganaría con un callback asincrónico acá.
+- **¿Por qué `OrderQueryPort`/`OutboxQueryPort` en vez de agregar métodos a `OrderRepository`/`OutboxRepository`?** Interface Segregation aplicado en serio. `OutboxRepository` existe para el relay: `save` + `findPendingBatch`, y el relay nunca quiere ver una fila `PUBLISHED`. El panel quiere exactamente lo contrario: las últimas N filas *con cualquier estado*. Meter ese método en el puerto del relay obligaría a toda implementación suya — incluidos los fakes in-memory de los tests de casos de uso — a crecer un método que ese caso de uso jamás llama, y acoplaría dos consumidores que no tienen nada que ver. Son dos puertos angostos; el adaptador JPA implementa los dos (`OutboxEventPersistenceAdapter implements OutboxRepository, OutboxQueryPort`), porque lo que se segrega es lo que *ve el llamador*, no la clase que lo cumple.
+- **¿Por qué los endpoints de lectura no tienen un `port/in`?** `OutboxController` y el nuevo `GET /api/orders` leen derecho a través de un puerto de salida, sin caso de uso intermedio — el mismo atajo CQRS-lite que ya usaba `NotificationController`. Son lecturas sin ninguna lógica de negocio: un `GetOutboxEventsUseCase` que solo reenvía la llamada sería ceremonia, no arquitectura. El camino de escritura (`CreateOrderUseCase`, `RelayOutboxEventsUseCase`) sí conserva sus puertos de entrada, que es donde hay reglas que proteger.
+- **¿Por qué el panel usa polling y no SSE/WebSocket?** Simplicidad deliberada. Son 3 endpoints de lectura acotados y un relay que ya funciona por poll cada 2s: un `setInterval` de 1s muestra la transición `PENDING → PUBLISHED` con resolución de sobra. Un canal de streaming agregaría reconexión, backpressure y estado en el servidor a cambio de nada visible en un demo de dos servicios. Está anotado como decisión, no como omisión.
+- **¿Por qué el CORS vive en `config/` y no en `application/`?** Porque es política de transporte HTTP: `domain` y `application` no saben que el mundo exterior habla HTTP, mucho menos qué orígenes de navegador están permitidos. `WebCorsConfiguration` es un adaptador de infraestructura, y la lista de orígenes es configuración (`WEB_CORS_ALLOWED_ORIGINS`), no una constante `localhost` en el código.
 - **¿Por qué `tryMarkProcessed` es un solo `INSERT ... ON CONFLICT DO NOTHING` en vez de `exists()` + `insert()`?** Esa secuencia tiene una carrera real bajo entregas concurrentes del mismo mensaje. Y una variante más ingenua todavía — un `save()` de JPA normal que deje que la constraint tire una excepción — tampoco funciona bien acá: haría eso *dentro* de la misma transacción que también tiene que guardar la `Notification`, y una `ConstraintViolationException` a mitad de flush dejaría el `EntityManager` en un estado inutilizable para el resto de esa transacción. Un `INSERT` nativo con `ON CONFLICT DO NOTHING` deja que la misma constraint de base haga el trabajo sin lanzar nada, así la transacción sigue viva para decidir si escribe la notificación o no.
 
 ## SOLID
@@ -296,7 +379,7 @@ order-outbox-service/
 | **S**RP | Cada `application/service` tiene una sola razón para cambiar: `CreateOrderService` solo crea órdenes, `OutboxRelayService` solo relaya. `OutboxEvent` y `Order` están separados aunque ambos describan "una orden que pasó" — uno es el hecho de negocio, el otro es el mecanismo de entrega. |
 | **O**CP | Agregar un nuevo tipo de evento no obliga a tocar `OutboxRelayService` — solo a agregar un nuevo caso de uso que produzca su propio `OutboxEvent`. |
 | **L**SP | Cualquier implementación de `OrderRepository`/`TransactionRunner` (la real o un fake en tests) es intercambiable sin que `CreateOrderService` note la diferencia — los tests de aplicación lo prueban literalmente, corriendo contra fakes en memoria. |
-| **I**SP | Puertos chicos y específicos (`ProcessedEventRepository` tiene un solo método) en vez de un `Repository` genérico gigante. |
+| **I**SP | Puertos chicos y específicos (`ProcessedEventRepository` tiene un solo método) en vez de un `Repository` genérico gigante. El caso más explícito: los endpoints de lectura del panel no ensancharon `OrderRepository`/`OutboxRepository` — se agregaron `OrderQueryPort`/`OutboxQueryPort` aparte, para que el relay y el caso de uso de creación sigan viendo exactamente los métodos que usan. |
 | **D**IP | `application/` depende de interfaces (`application/port/out/*`), nunca de las clases JPA/Kafka concretas — la dirección de la dependencia siempre apunta hacia adentro del hexágono. |
 | **ArchUnit** | El diferenciador real frente al resto del portfolio: SOLID acá no es una convención de code review, son 5 tests que fallan el build si alguien importa `org.springframework..` desde `domain/` o `application/`, o si un adaptador esquiva los puertos e importa `application.service` directo. |
 
@@ -304,9 +387,11 @@ order-outbox-service/
 
 - **Debezium / CDC**: el relay pollea la tabla outbox directamente; capturar el WAL de Postgres es una optimización real para alta escala, no necesaria para demostrar el patrón.
 - **Notificaciones reales (email/SMS)**: `Notification` se persiste y se puede consultar vía `GET /api/notifications` — no se envía nada de verdad.
-- **Autenticación**: ningún endpoint requiere login ni token.
-- **Dashboard React**: pasada futura, no incluida acá.
-- **Deploy en la nube**: Postgres×2 + Kafka + 2 servicios no entra cómodo en el free tier de ningún proveedor gratuito habitual.
+- **Autenticación**: ningún endpoint requiere login ni token — tampoco el panel, que es de solo lectura más un `POST` de demo.
+- **Streaming hacia el panel (SSE/WebSocket)**: el dashboard pollea cada 1s a propósito; ver "Decisiones puntuales".
+- **Tests del dashboard**: no hay suite de front (Vitest/Testing Library). La verificación del panel es el `tsc --noEmit` del build más el checklist manual; los endpoints que consume sí están cubiertos del lado Java.
+- **Paginación / filtros en los endpoints de lectura**: devuelven un tope fijo (`RECENT_ORDERS_LIMIT`, `RECENT_OUTBOX_EVENTS_LIMIT` = 50) sin cursor ni query params.
+- **Deploy en la nube**: Postgres×2 + Kafka + 2 servicios + panel no entra cómodo en el free tier de ningún proveedor gratuito habitual.
 - **Contract testing formal (Pact)**: la mitigación de drift entre los dos contratos de evento es manual (fixtures espejadas en tests), no automatizada con un broker de contratos.
 - **Test end-to-end cross-servicio en un solo proceso JVM**: la garantía de punta a punta se valida con el checklist manual sobre `docker compose`, no en CI.
 - **`SELECT ... FOR UPDATE SKIP LOCKED`**: necesario si `order-service` corriera con múltiples réplicas leyendo el mismo outbox — este demo corre una sola réplica por servicio.
@@ -366,8 +451,29 @@ processed_events (
 | Método | Ruta | Descripción |
 |---|---|---|
 | `POST` | `/api/orders` | Crea una orden. `201` + `Location`. `400` si `quantity <= 0` o falla la validación de request. |
+| `GET` | `/api/orders` | Últimas órdenes, más nuevas primero, tope `RECENT_ORDERS_LIMIT` (50). Lee por `OrderQueryPort`. |
 | `GET` | `/api/orders/{id}` | Devuelve la orden o `404`. |
+| `GET` | `/api/outbox` | Últimos eventos del outbox, más nuevos primero, tope `RECENT_OUTBOX_EVENTS_LIMIT` (50). Lee por `OutboxQueryPort`. |
 | `GET` | `/actuator/health` | Healthcheck (usado por `docker-compose.yml`). |
+
+`GET /api/outbox` — la vista que hace visible la garantía del patrón. Sin `payload` a propósito (puede ser grande y ya viaja por Kafka):
+
+```json
+[
+  {
+    "id": "171ec1f8-3271-4782-80da-606afc44d382",
+    "aggregateType": "Order",
+    "aggregateId": "bf26afee-5d5f-4852-a846-4f8e282954c7",
+    "eventType": "OrderCreated",
+    "status": "PENDING",
+    "publishAttempts": 0,
+    "occurredAt": "2026-09-01T05:18:45.336935Z",
+    "publishedAt": null
+  }
+]
+```
+
+Dos segundos después, esa misma fila: `"status": "PUBLISHED"` y `"publishedAt": "2026-09-01T05:18:47.815753Z"`.
 
 Body de `POST /api/orders`:
 
@@ -385,8 +491,16 @@ Body de `POST /api/orders`:
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `GET` | `/api/notifications` | Lista todas las notificaciones (verificación manual, no un caso de uso de negocio). |
+| `GET` | `/api/notifications` | Lista todas las notificaciones (verificación manual + tercera columna del panel, no un caso de uso de negocio). |
 | `GET` | `/actuator/health` | Healthcheck. |
+
+### dashboard (`:8008`)
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/` | SPA React servida por nginx. Cualquier otra ruta devuelve el mismo `index.html`. |
+
+No expone API propia: todo lo que muestra sale de los dos servicios de arriba, llamados desde el navegador.
 
 ## Configuration
 
@@ -399,6 +513,18 @@ Variables relevantes (con sus defaults en `application.yml`; `docker-compose.yml
 | `outbox.relay.poll-interval-ms` | order-service | `2000` | Cada cuánto corre el scheduler del relay |
 | `outbox.relay.publish-timeout-ms` | order-service | `5000` | Cuánto espera `KafkaEventPublisher` una confirmación local (ver Troubleshooting) |
 | `spring.kafka.consumer.group-id` | notification-service | `notification-service` | Consumer group — usado también en el checklist de reset de offsets |
+| `WEB_CORS_ALLOWED_ORIGINS` (`web.cors.allowed-origins`) | ambos | `http://localhost:8008,http://localhost:5173` | Orígenes de navegador autorizados sobre `/api/**`. 8008 es el panel en Docker; 5173 es `npm run dev`. Cualquier otro origen recibe `403`. |
+| `VITE_ORDER_API_URL` | dashboard (build) | `http://localhost:8006` | A dónde apunta el navegador para `GET /api/orders`, `GET /api/outbox` y `POST /api/orders` |
+| `VITE_NOTIFICATION_API_URL` | dashboard (build) | `http://localhost:8007` | A dónde apunta el navegador para `GET /api/notifications` |
+
+Las dos `VITE_*` son variables de **build**, no de runtime: Vite las hornea en el bundle, así que `docker-compose.yml` las pasa como `build.args` (con default) y no como `environment`. Consecuencia práctica: tienen que resolver desde la máquina del visitante — `http://order-service:8006` no sirve, porque ese nombre solo existe dentro de `outbox_net`. Para exponer el panel en otro host:
+
+```bash
+VITE_ORDER_API_URL=https://api.ejemplo.com \
+VITE_NOTIFICATION_API_URL=https://notif.ejemplo.com \
+WEB_CORS_ALLOWED_ORIGINS=https://panel.ejemplo.com \
+docker compose up --build
+```
 
 ## Cloud Deploy
 
@@ -413,15 +539,26 @@ mvn -pl order-service,notification-service verify
 Corre, para cada módulo:
 
 - **Unit** (`*Test.java`, Surefire): dominio puro (`OrderTest`, `MoneyTest`, `OutboxEventTest`, `NotificationTest`, `ProcessedEventTest`) y casos de uso contra **fakes en memoria escritos a mano** (`InMemoryOrderRepository`, `InMemoryOutboxRepository`, `InMemoryTransactionRunner`, etc.) — sin Mockito.
+- **Web** (`OrderControllerTest`, `OutboxControllerTest`, también Surefire): `MockMvc` standalone sobre el controlador real, cableado a esos mismos fakes — sin `ApplicationContext` ni base de datos. Van por HTTP y no por llamada directa porque lo que más fácil se rompe es el ruteo: `GET /api/orders` (colección) tiene que convivir con `GET /api/orders/{id}` sin taparse. `OutboxControllerTest` recorre el ciclo completo de una fila: `PENDING` sin `publishedAt` → `PUBLISHED` con uno.
 - **Arquitectura** (`HexagonalArchitectureTest`, también Surefire): las 5 reglas ArchUnit descritas en SOLID.
 - **Integración** (`*IT.java`, Failsafe, Testcontainers — Postgres y Kafka reales):
-  - `OrderPersistenceAdapterIT` — el test insignia: fuerza una excepción a mitad de una transacción y confirma que ni `Order` ni `OutboxEvent` quedaron persistidos.
+  - `OrderPersistenceAdapterIT` — el test insignia: fuerza una excepción a mitad de una transacción y confirma que ni `Order` ni `OutboxEvent` quedaron persistidos. Cubre además los dos puertos de consulta contra el `ORDER BY` real de Postgres, incluida una fila `PUBLISHED` que el relay nunca vería.
   - `KafkaEventPublisherIT` — publica de verdad y lo verifica con un `KafkaConsumer` plano.
   - `ProcessedEventPersistenceAdapterIT` — confirma que el segundo `tryMarkProcessed` con el mismo `eventId` da `false` por la constraint real de Postgres.
   - `OrderCreatedEventConsumerIT` — el test más importante del repo: produce el mismo mensaje dos veces, confirma exactamente una fila en `notifications`.
 
-Estado verificado en esta máquina: **43 tests unitarios + de arquitectura, 7 tests de integración con Testcontainers — los 50 en verde**, más el checklist manual completo sobre `docker compose up` (crear orden, ver el outbox publicarse, matar Kafka a mitad de flujo y confirmar que no se pierde el evento, resetear offsets a `earliest` y reprocesar el topic entero sin duplicados, reiniciar `notification-service` a mitad de un burst de órdenes).
+Estado verificado en esta máquina: **52 tests unitarios/web/de arquitectura, 10 tests de integración con Testcontainers — los 62 en verde**, más el checklist manual completo sobre `docker compose up` (crear orden, ver el outbox publicarse, matar Kafka a mitad de flujo y confirmar que no se pierde el evento, resetear offsets a `earliest` y reprocesar el topic entero sin duplicados, reiniciar `notification-service` a mitad de un burst de órdenes).
+
+El dashboard no tiene suite propia (ver "Fuera de alcance"); su red de seguridad es `tsc --noEmit`, que corre como primer paso de `npm run build` y por lo tanto también dentro del `docker compose up --build`:
+
+```bash
+cd dashboard && npm run build
+```
 
 ## Tech Stack
 
-Java 21 · Spring Boot 3.3 (Web, Data JPA, Kafka, Validation, Actuator) · Maven (reactor multi-módulo) · PostgreSQL 16 · Apache Kafka (KRaft, sin Zookeeper) · Flyway · Testcontainers · ArchUnit · JUnit 5 + AssertJ · Docker / Docker Compose · GitHub Actions
+**Backend** — Java 21 · Spring Boot 3.3 (Web, Data JPA, Kafka, Validation, Actuator) · Maven (reactor multi-módulo) · PostgreSQL 16 · Apache Kafka (KRaft, sin Zookeeper) · Flyway · Testcontainers · ArchUnit · JUnit 5 + AssertJ
+
+**Panel** — React 19 · TypeScript (`strict`) · Vite · CSS a mano, sin framework de UI ni librería de componentes · nginx (imagen de runtime)
+
+**Infra** — Docker / Docker Compose · GitHub Actions
