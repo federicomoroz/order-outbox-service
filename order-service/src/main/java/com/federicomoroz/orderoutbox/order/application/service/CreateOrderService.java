@@ -10,6 +10,7 @@ import com.federicomoroz.orderoutbox.order.domain.CustomerId;
 import com.federicomoroz.orderoutbox.order.domain.Money;
 import com.federicomoroz.orderoutbox.order.domain.Order;
 import com.federicomoroz.orderoutbox.order.domain.OutboxEvent;
+import com.federicomoroz.orderoutbox.order.domain.OutboxEventId;
 import com.federicomoroz.orderoutbox.order.domain.event.OrderCreatedEvent;
 
 import java.time.Clock;
@@ -59,7 +60,10 @@ public final class CreateOrderService implements CreateOrderUseCase {
     }
 
     private OutboxEvent toOutboxEvent(Order order) {
+        OutboxEventId eventId = OutboxEventId.newId();
+
         OrderCreatedEvent domainEvent = new OrderCreatedEvent(
+                eventId.value(),
                 order.id().value(),
                 order.customerId().value(),
                 order.productId(),
@@ -70,7 +74,7 @@ public final class CreateOrderService implements CreateOrderUseCase {
 
         String payload = eventSerializer.serialize(domainEvent);
 
-        return OutboxEvent.record(AGGREGATE_TYPE_ORDER, order.id().toString(), EVENT_TYPE_ORDER_CREATED, payload,
-                order.createdAt());
+        return OutboxEvent.recordWithId(eventId, AGGREGATE_TYPE_ORDER, order.id().toString(),
+                EVENT_TYPE_ORDER_CREATED, payload, order.createdAt());
     }
 }

@@ -44,7 +44,18 @@ public final class OutboxEvent {
     /** Records a brand-new domain fact, always starting life as {@link OutboxStatus#PENDING}. */
     public static OutboxEvent record(String aggregateType, String aggregateId, String eventType, String payload,
                                       Instant occurredAt) {
-        return new OutboxEvent(OutboxEventId.newId(), aggregateType, aggregateId, eventType, payload, occurredAt,
+        return recordWithId(OutboxEventId.newId(), aggregateType, aggregateId, eventType, payload, occurredAt);
+    }
+
+    /**
+     * Same as {@link #record}, but with the id supplied by the caller instead of generated here.
+     * Needed when the id must also be embedded in the serialized payload itself — e.g. so a
+     * downstream idempotent consumer has a stable event identity to deduplicate on, independent
+     * of any business key. See {@code CreateOrderService}.
+     */
+    public static OutboxEvent recordWithId(OutboxEventId id, String aggregateType, String aggregateId,
+                                            String eventType, String payload, Instant occurredAt) {
+        return new OutboxEvent(id, aggregateType, aggregateId, eventType, payload, occurredAt,
                 OutboxStatus.PENDING, 0, null);
     }
 
