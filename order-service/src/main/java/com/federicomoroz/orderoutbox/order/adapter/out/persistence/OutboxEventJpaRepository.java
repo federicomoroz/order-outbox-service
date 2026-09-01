@@ -10,4 +10,6 @@ import java.util.UUID;
 interface OutboxEventJpaRepository extends JpaRepository<OutboxEventJpaEntity, UUID> {
 
     List<OutboxEventJpaEntity> findByStatusOrderByOccurredAtAsc(String status, Pageable pageable);
+
+    List<OutboxEventJpaEntity> findAllByOrderByOccurredAtDesc(Pageable pageable);
 }

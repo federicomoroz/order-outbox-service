@@ -4,6 +4,7 @@ import com.federicomoroz.orderoutbox.order.domain.CustomerId;
 import com.federicomoroz.orderoutbox.order.domain.Money;
 import com.federicomoroz.orderoutbox.order.domain.Order;
 import com.federicomoroz.orderoutbox.order.domain.OutboxEvent;
+import com.federicomoroz.orderoutbox.order.domain.OutboxStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -17,6 +18,7 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -91,6 +93,64 @@ class OrderPersistenceAdapterIT {
         assertThat(outboxEventPersistenceAdapter.findPendingBatch(50))
                 .extracting(OutboxEvent::id)
                 .doesNotContain(outboxEvent.id());
+    }
+
+    @Test
+    void recentOrdersComeBackNewestFirst_realOrderByAgainstPostgres() {
+        Order older = orderPlacedAt("sku-recent-older", "2026-06-01T10:00:00Z");
+        Order newer = orderPlacedAt("sku-recent-newer", "2026-06-01T10:00:05Z");
+
+        transactionRunner.run(() -> {
+            orderPersistenceAdapter.save(older);
+            orderPersistenceAdapter.save(newer);
+        });
+
+        // Both timestamps are deliberately later than every other order this class writes, so
+        // these two are always the newest regardless of the order JUnit runs the methods in.
+        assertThat(orderPersistenceAdapter.findRecent(2))
+                .containsExactly(newer, older);
+    }
+
+    @Test
+    void recentOrdersRespectTheRequestedLimit() {
+        transactionRunner.run(() -> {
+            orderPersistenceAdapter.save(orderPlacedAt("sku-limit-a", "2026-07-01T10:00:00Z"));
+            orderPersistenceAdapter.save(orderPlacedAt("sku-limit-b", "2026-07-01T10:00:01Z"));
+            orderPersistenceAdapter.save(orderPlacedAt("sku-limit-c", "2026-07-01T10:00:02Z"));
+        });
+
+        assertThat(orderPersistenceAdapter.findRecent(2)).hasSize(2);
+    }
+
+    @Test
+    void recentOutboxEventsComeBackNewestFirst_withLifecycleStateIntact() {
+        OutboxEvent published = OutboxEvent.record("Order", "order-" + UUID.randomUUID(), "OrderCreated",
+                "{\"k\":\"v\"}", Instant.parse("2026-06-01T10:00:00Z"));
+        published.markPublished(Instant.parse("2026-06-01T10:00:03Z"));
+        OutboxEvent pending = OutboxEvent.record("Order", "order-" + UUID.randomUUID(), "OrderCreated",
+                "{\"k\":\"v\"}", Instant.parse("2026-06-01T10:00:05Z"));
+
+        transactionRunner.run(() -> {
+            outboxEventPersistenceAdapter.save(published);
+            outboxEventPersistenceAdapter.save(pending);
+        });
+
+        List<OutboxEvent> recent = outboxEventPersistenceAdapter.findRecent(2);
+
+        // Unlike findPendingBatch, the query port has to surface already-PUBLISHED rows too —
+        // that is the whole point of the dashboard's outbox column.
+        assertThat(recent).extracting(OutboxEvent::id).containsExactly(pending.id(), published.id());
+        assertThat(recent.get(0).status()).isEqualTo(OutboxStatus.PENDING);
+        assertThat(recent.get(0).publishedAt()).isNull();
+        assertThat(recent.get(1).status()).isEqualTo(OutboxStatus.PUBLISHED);
+        assertThat(recent.get(1).publishedAt()).isEqualTo(Instant.parse("2026-06-01T10:00:03Z"));
+        assertThat(recent.get(1).publishAttempts()).isZero();
+    }
+
+    private static Order orderPlacedAt(String productId, String createdAt) {
+        return Order.place(CustomerId.of(UUID.randomUUID()), productId, 1,
+                Money.of(new BigDecimal("9.99"), "USD"),
+                Clock.fixed(Instant.parse(createdAt), ZoneOffset.UTC));
     }
 
     @SpringBootApplication
