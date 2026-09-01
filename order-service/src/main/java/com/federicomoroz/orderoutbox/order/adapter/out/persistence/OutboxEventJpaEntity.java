@@ -3,7 +3,6 @@ package com.federicomoroz.orderoutbox.order.adapter.out.persistence;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
@@ -27,7 +26,9 @@ class OutboxEventJpaEntity {
     @Column(name = "event_type", nullable = false)
     private String eventType;
 
-    @Lob
+    // No @Lob here: on Postgres, Hibernate maps @Lob String to the `oid` large-object type by
+    // default, which doesn't match the plain `TEXT` column Flyway creates. A plain @Column is
+    // exactly right for Postgres text of any length.
     @Column(name = "payload", nullable = false)
     private String payload;
 

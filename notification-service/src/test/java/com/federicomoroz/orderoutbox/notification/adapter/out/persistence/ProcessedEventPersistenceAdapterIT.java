@@ -20,10 +20,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Proves {@code tryMarkProcessed}'s idempotency guarantee is real, not just documented: the
  * second call for the same {@code eventId} must return {@code false} because a real Postgres
- * {@code PRIMARY KEY} constraint on {@code processed_events.event_id} rejects the duplicate —
- * each call here runs in its own transaction (Spring Data JPA's default per-method transactional
- * behavior on the repository proxy), so this genuinely proves cross-transaction, DB-level
- * uniqueness, not same-session visibility.
+ * {@code PRIMARY KEY} constraint on {@code processed_events.event_id} rejects the duplicate.
+ *
+ * <p>Each call goes through {@link SpringTransactionRunner} — exactly how
+ * {@code HandleOrderCreatedEventService} really invokes this adapter — with each call getting
+ * its own separate, real, committed transaction. That's deliberate: the underlying
+ * {@code @Modifying} native query requires an active JPA transaction to execute at all (calling
+ * the adapter with no surrounding transaction throws {@code TransactionRequiredException}), and
+ * running each attempt in its own transaction is what proves this is a true cross-transaction,
+ * DB-level uniqueness guarantee — not same-session/same-transaction visibility.
  */
 @SpringBootTest(classes = ProcessedEventPersistenceAdapterIT.PersistenceTestConfig.class,
         webEnvironment = SpringBootTest.WebEnvironment.NONE)
@@ -39,12 +44,17 @@ class ProcessedEventPersistenceAdapterIT {
     @Autowired
     private ProcessedEventPersistenceAdapter processedEventPersistenceAdapter;
 
+    @Autowired
+    private SpringTransactionRunner transactionRunner;
+
     @Test
     void secondTryMarkProcessedForTheSameEventIdReturnsFalse_dbConstraintEnforcesIt() {
         UUID eventId = UUID.randomUUID();
 
-        boolean first = processedEventPersistenceAdapter.tryMarkProcessed(ProcessedEvent.of(eventId, FIXED_CLOCK));
-        boolean second = processedEventPersistenceAdapter.tryMarkProcessed(ProcessedEvent.of(eventId, FIXED_CLOCK));
+        boolean first = transactionRunner.run(() ->
+                processedEventPersistenceAdapter.tryMarkProcessed(ProcessedEvent.of(eventId, FIXED_CLOCK)));
+        boolean second = transactionRunner.run(() ->
+                processedEventPersistenceAdapter.tryMarkProcessed(ProcessedEvent.of(eventId, FIXED_CLOCK)));
 
         assertThat(first).isTrue();
         assertThat(second).isFalse();
@@ -52,10 +62,10 @@ class ProcessedEventPersistenceAdapterIT {
 
     @Test
     void differentEventIdsAreEachMarkedProcessedSuccessfully() {
-        boolean first =
-                processedEventPersistenceAdapter.tryMarkProcessed(ProcessedEvent.of(UUID.randomUUID(), FIXED_CLOCK));
-        boolean second =
-                processedEventPersistenceAdapter.tryMarkProcessed(ProcessedEvent.of(UUID.randomUUID(), FIXED_CLOCK));
+        boolean first = transactionRunner.run(() ->
+                processedEventPersistenceAdapter.tryMarkProcessed(ProcessedEvent.of(UUID.randomUUID(), FIXED_CLOCK)));
+        boolean second = transactionRunner.run(() ->
+                processedEventPersistenceAdapter.tryMarkProcessed(ProcessedEvent.of(UUID.randomUUID(), FIXED_CLOCK)));
 
         assertThat(first).isTrue();
         assertThat(second).isTrue();
