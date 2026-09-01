@@ -22,3 +22,24 @@ jobs:
       # Docker daemon already present on ubuntu-latest runners.
       - name: mvn verify (unit + ArchUnit + Testcontainers integration)
         run: mvn -B verify
+
+  # El dashboard no tiene suite de tests propia (ver "Fuera de alcance" en el README); su red de
+  # seguridad es el typecheck estricto, que `npm run build` corre como primer paso.
+  dashboard-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: npm ci
+        working-directory: dashboard
+        run: npm ci
+
+      - name: npm run build (tsc --noEmit + vite build)
+        working-directory: dashboard
+        run: npm run build

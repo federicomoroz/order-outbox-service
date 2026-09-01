@@ -96,6 +96,8 @@ services:
       - SPRING_DATASOURCE_USERNAME=orders
       - SPRING_DATASOURCE_PASSWORD=orders
       - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # Origenes de navegador permitidos sobre /api/** (el panel en :8008 por defecto).
+      - WEB_CORS_ALLOWED_ORIGINS=${WEB_CORS_ALLOWED_ORIGINS:-http://localhost:8008,http://localhost:5173}
     depends_on:
       postgres-orders:
         condition: service_healthy
@@ -122,6 +124,8 @@ services:
       - SPRING_DATASOURCE_USERNAME=notifications
       - SPRING_DATASOURCE_PASSWORD=notifications
       - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # Origenes de navegador permitidos sobre /api/** (el panel en :8008 por defecto).
+      - WEB_CORS_ALLOWED_ORIGINS=${WEB_CORS_ALLOWED_ORIGINS:-http://localhost:8008,http://localhost:5173}
     depends_on:
       postgres-notifications:
         condition: service_healthy
@@ -133,6 +137,34 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    networks:
+      - outbox_net
+
+  # Panel de observabilidad (React + Vite, servido por nginx). Es un cliente del navegador:
+  # no habla con Postgres ni con Kafka, solo con las 3 APIs HTTP de lectura. Por eso las URLs
+  # van como build args — se hornean en el bundle y tienen que resolver desde la maquina del
+  # visitante (localhost), no desde adentro de outbox_net.
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        - VITE_ORDER_API_URL=${VITE_ORDER_API_URL:-http://localhost:8006}
+        - VITE_NOTIFICATION_API_URL=${VITE_NOTIFICATION_API_URL:-http://localhost:8007}
+    restart: unless-stopped
+    ports:
+      - "8008:8008"
+    depends_on:
+      order-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     networks:
       - outbox_net
 

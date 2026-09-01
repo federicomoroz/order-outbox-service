@@ -3,3 +3,7 @@
 .idea/
 *.iml
 .github/
+# El build de los servicios Java usa la raiz como contexto: no tiene por que subir el
+# node_modules del dashboard (que tiene su propio contexto y su propio .dockerignore).
+dashboard/node_modules/
+dashboard/dist/
