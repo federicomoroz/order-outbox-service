@@ -1,0 +1,1025 @@
+/*
+ * Panel de observabilidad — tema oscuro corporativo.
+ *
+ * Paleta tomada del sistema visual del portfolio (dark navy + 4 acentos). Regla que se respeta
+ * en todo el archivo: el color es SEMANTICO, no decorativo. Ambar = PENDING, verde = PUBLISHED,
+ * rojo = FAILED, azul = informacion/accion. Nada se pinta "porque queda lindo".
+ */
+
+:root {
+  --bg: #0a1628;
+  --bg-far: #0d2140;
+  --panel: #0d1f3c;
+  --panel-2: #132a4e;
+  --row: #0b1d38;
+  --field: #091a31;
+  --border: #1e3a5f;
+  --border-soft: rgba(30, 58, 95, 0.65);
+
+  --text: #ffffff;
+  --text-2: #cbd5e1;
+  --text-3: #94a3b8;
+  --text-4: #6b86a6;
+
+  --green: #22c55e;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --blue: #3b82f6;
+  --cyan: #06b6d4;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(60rem 40rem at 12% -10%, rgba(59, 130, 246, 0.07), transparent 60%),
+    radial-gradient(50rem 34rem at 92% 108%, rgba(34, 197, 94, 0.05), transparent 60%),
+    linear-gradient(135deg, var(--bg) 0%, var(--bg-far) 100%);
+  background-attachment: fixed;
+  color: var(--text-2);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+p,
+figure {
+  margin: 0;
+}
+
+ul {
+  margin: 0;
+  padding: 0;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+button,
+input,
+select {
+  font-family: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: rgba(59, 130, 246, 0.35);
+}
+
+/* Numeros y horas siempre alineados en columna: sin esto un contador que pasa de 9 a 10
+   desplaza toda la fila y el panel "tiembla" a cada poll. */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* ── Layout ───────────────────────────────────────────────────────────────── */
+
+.app {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.app__main {
+  width: min(1500px, 100%);
+  margin-inline: auto;
+  padding: 20px clamp(14px, 2.4vw, 32px) 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px 20px;
+  flex-wrap: wrap;
+  padding: 13px clamp(14px, 2.4vw, 32px);
+  background: rgba(10, 22, 40, 0.86);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.app-header__mark {
+  width: 34px;
+  height: 34px;
+  flex: none;
+}
+
+.app-header__title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.app-header__subtitle {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.app-header__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-header__poll {
+  font-size: 11px;
+  color: var(--text-4);
+  padding-left: 4px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-4);
+  white-space: nowrap;
+}
+
+.chip__name {
+  color: var(--text-2);
+  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.chip__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex: none;
+}
+
+.chip--ok .chip__dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.16);
+  animation: breathe 2.6s ease-in-out infinite;
+}
+
+.chip--down .chip__dot {
+  background: var(--red);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16);
+}
+
+.chip--unknown .chip__dot {
+  background: var(--amber);
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ── Métricas ─────────────────────────────────────────────────────────────── */
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+  gap: 10px;
+}
+
+.metric {
+  position: relative;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 11px 17px;
+  --metric-accent: var(--border);
+}
+
+.metric::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--metric-accent);
+}
+
+.metric--blue {
+  --metric-accent: var(--blue);
+}
+.metric--amber {
+  --metric-accent: var(--amber);
+}
+.metric--green {
+  --metric-accent: var(--green);
+}
+.metric--red {
+  --metric-accent: var(--red);
+}
+
+.metric__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-3);
+}
+
+.metric__value {
+  margin-top: 5px;
+  font-size: 27px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.metric--amber .metric__value {
+  color: var(--amber);
+}
+.metric--green .metric__value {
+  color: var(--green);
+}
+.metric--red .metric__value {
+  color: var(--red);
+}
+
+.metric__hint {
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--text-4);
+}
+
+/* ── Crear orden ──────────────────────────────────────────────────────────── */
+
+.creator {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.creator__intro {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.creator__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.creator__hint {
+  font-size: 11.5px;
+  color: var(--text-4);
+}
+
+.creator__hint code {
+  color: var(--green);
+}
+
+.creator__form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.field--wide {
+  flex: 1 1 190px;
+  /* Sin tope, el campo de producto se come todo el ancho libre y el formulario queda torcido. */
+  max-width: 300px;
+}
+
+.field--narrow {
+  flex: 0 1 112px;
+}
+
+.field--customer {
+  flex: 0 1 auto;
+}
+
+.field__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+
+.field__input {
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px 10px;
+  min-width: 0;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.field__input:focus {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+.field__combo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.field__readonly {
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+.creator__actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.button {
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  padding: 9px 16px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.button--primary {
+  background: var(--blue);
+  color: #ffffff;
+}
+
+.button--primary:hover:not(:disabled) {
+  background: #2f74e0;
+}
+
+.button--secondary {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-2);
+}
+
+.button--secondary:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--text);
+}
+
+.button--ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-3);
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.button--ghost:hover:not(:disabled) {
+  color: var(--text-2);
+  border-color: var(--text-4);
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.creator__feedback {
+  min-height: 17px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+}
+
+.creator__feedback--idle {
+  color: transparent;
+}
+.creator__feedback--working {
+  color: var(--text-3);
+}
+.creator__feedback--ok {
+  color: var(--green);
+}
+.creator__feedback--error {
+  color: var(--red);
+}
+
+/* ── Tablero del circuito ─────────────────────────────────────────────────── */
+
+.board {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 124px minmax(0, 1fr) 124px minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.stage__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(19, 42, 78, 0.75), rgba(19, 42, 78, 0));
+}
+
+.stage__step {
+  flex: none;
+  width: 21px;
+  height: 21px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #08131f;
+  background: var(--stage-accent);
+}
+
+.stage--blue {
+  --stage-accent: var(--blue);
+}
+.stage--amber {
+  --stage-accent: var(--amber);
+}
+.stage--green {
+  --stage-accent: var(--green);
+}
+
+.stage__titles {
+  min-width: 0;
+}
+
+.stage__title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.005em;
+}
+
+.stage__source {
+  font-size: 10.5px;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage__count {
+  margin-left: auto;
+  flex: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 1px 9px;
+}
+
+.stage__body {
+  flex: 1;
+  overflow-y: auto;
+  max-height: min(52vh, 470px);
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.stage__body::-webkit-scrollbar {
+  width: 8px;
+}
+.stage__body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+.stage__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.stage__list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stage__empty {
+  padding: 26px 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-4);
+}
+
+.stage__empty--error {
+  color: var(--red);
+}
+
+/* ── Filas ────────────────────────────────────────────────────────────────── */
+
+.row {
+  --row-accent: var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  background: var(--row);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--row-accent);
+  border-radius: var(--radius-sm);
+}
+
+.row--blue {
+  --row-accent: var(--blue);
+}
+.row--amber {
+  --row-accent: var(--amber);
+}
+.row--green {
+  --row-accent: var(--green);
+}
+.row--red {
+  --row-accent: var(--red);
+}
+
+.row__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row__title--event {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.row__title--message {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--text-2);
+  line-height: 1.4;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.row__value {
+  margin-left: auto;
+  flex: none;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.row__attempts {
+  margin-left: auto;
+  flex: none;
+  font-size: 10.5px;
+  color: var(--amber);
+  background: rgba(251, 191, 36, 0.12);
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+
+.row__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.row__meta .mono {
+  color: var(--text-4);
+}
+
+.row__dot {
+  color: var(--border);
+}
+
+.row__arrow {
+  color: var(--text-4);
+}
+
+.row__time {
+  margin-left: auto;
+  color: var(--text-4);
+}
+
+.row__latency {
+  color: var(--green);
+  font-weight: 500;
+}
+
+.row__note {
+  color: var(--text-4);
+  font-style: italic;
+}
+
+.row__note--error {
+  color: var(--red);
+  font-style: normal;
+}
+
+/*
+ * El resaltado no es adorno: es lo que hace visible una transicion que, si no, ocurre entre dos
+ * renders y nadie ve. Toma el color del propio estado de la fila (`--row-accent`), asi el
+ * destello de un PUBLISHED es verde y el de un FAILED es rojo, sin logica extra en JS.
+ */
+@keyframes row-flash {
+  from {
+    box-shadow: inset 0 0 0 9999px color-mix(in oklab, var(--row-accent) 26%, transparent);
+  }
+  to {
+    box-shadow: inset 0 0 0 9999px transparent;
+  }
+}
+
+@keyframes row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.row--flash-changed {
+  animation: row-flash 1.6s ease-out;
+}
+
+.row--flash-new {
+  animation:
+    row-flash 1.6s ease-out,
+    row-enter 0.26s ease-out;
+}
+
+/* ── Pills de estado ──────────────────────────────────────────────────────── */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+
+.pill__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.pill--pending {
+  color: var(--amber);
+  border-color: rgba(251, 191, 36, 0.38);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.pill--pending .pill__dot {
+  animation: breathe 1.5s ease-in-out infinite;
+}
+
+.pill--published {
+  color: var(--green);
+  border-color: rgba(34, 197, 94, 0.38);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.pill--failed {
+  color: var(--red);
+  border-color: rgba(239, 68, 68, 0.38);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+/* ── Conectores entre etapas ──────────────────────────────────────────────── */
+
+.connector {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 10px;
+  text-align: center;
+}
+
+.connector__track {
+  position: relative;
+  width: 100%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border) 18%, var(--border) 82%, transparent);
+}
+
+.connector__head {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0;
+  height: 0;
+  border-left: 6px solid var(--border);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+
+.connector--active .connector__head {
+  border-left-color: var(--cyan);
+}
+
+.connector__dot {
+  position: absolute;
+  top: 50%;
+  left: 10%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 9px rgba(6, 182, 212, 0.85);
+  transform: translate(-50%, -50%);
+  opacity: 0;
+}
+
+/* Solo viaja cuando hay algo viajando de verdad: un panel que anima siempre no informa nada. */
+.connector--active .connector__dot {
+  animation: connector-travel 1.9s linear infinite;
+}
+
+@keyframes connector-travel {
+  0% {
+    left: 10%;
+    opacity: 0;
+  }
+  14% {
+    opacity: 1;
+  }
+  86% {
+    opacity: 1;
+  }
+  100% {
+    left: 90%;
+    opacity: 0;
+  }
+}
+
+.connector__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-3);
+  line-height: 1.35;
+}
+
+.connector__detail {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-4);
+  overflow-wrap: anywhere;
+}
+
+/* ── Leyenda ──────────────────────────────────────────────────────────────── */
+
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.legend__states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.legend__item strong {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.legend__swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.legend__swatch--amber {
+  background: var(--amber);
+}
+.legend__swatch--green {
+  background: var(--green);
+}
+.legend__swatch--red {
+  background: var(--red);
+}
+
+.legend__note {
+  font-size: 11px;
+  color: var(--text-4);
+}
+
+.legend__note code {
+  color: var(--text-3);
+}
+
+/* ── Responsive ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 1180px) {
+  .board {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .connector {
+    flex-direction: row;
+    justify-content: center;
+    gap: 12px;
+    padding: 12px 0;
+  }
+
+  .connector__track {
+    width: 70px;
+    flex: none;
+  }
+
+  .connector__label,
+  .connector__detail {
+    white-space: nowrap;
+  }
+
+  .stage__body {
+    max-height: 42vh;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-header__subtitle,
+  .chip__state {
+    display: none;
+  }
+
+  .creator__actions {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .creator__actions .button {
+    flex: 1;
+  }
+
+  .connector__detail {
+    display: none;
+  }
+}
+
+/* ── Accesibilidad: sin movimiento ────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  /* El destello sigue existiendo, pero como un fondo fijo que se apaga cuando React saca la
+     clase: se conserva la informacion ("esta fila cambio") sin nada que se mueva. */
+  .row--flash-new,
+  .row--flash-changed {
+    box-shadow: inset 0 0 0 9999px color-mix(in oklab, var(--row-accent) 18%, transparent);
+  }
+
+  .connector--active .connector__dot {
+    opacity: 1;
+    left: 50%;
+  }
+}

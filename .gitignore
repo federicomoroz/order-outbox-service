@@ -11,3 +11,7 @@ target/
 *.log
 .env
 .DS_Store
+
+# dashboard (Vite/React)
+node_modules/
+dist/
