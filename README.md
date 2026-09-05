@@ -6,8 +6,6 @@ Dos microservicios Java/Spring Boot (`order-service` + `notification-service`) q
 
 Incluye un **panel de observabilidad en React** (`:8008`) que muestra el circuito completo en vivo: una orden entrando, su fila de outbox pasando de `PENDING` a `PUBLISHED`, y la notificación aterrizando en la base de datos del *otro* servicio — exactamente una vez.
 
-Pieza de portfolio pensada para demostrar experiencia Java/Spring Boot con rigor de arquitectura hexagonal — el resto del portfolio es Python/FastAPI.
-
 ## Live Demo
 
 No aplica en esta iteración. El stack (2 Postgres + Kafka + 2 servicios + panel) no corre cómodo en el free tier de ningún proveedor cloud gratuito; ver "Cloud Deploy" más abajo. Localmente, `docker compose up --build` y **http://localhost:8008** dan la demo completa.
@@ -415,11 +413,11 @@ order-outbox-service/
 | **L**SP | Cualquier implementación de `OrderRepository`/`TransactionRunner` (la real o un fake en tests) es intercambiable sin que `CreateOrderService` note la diferencia — los tests de aplicación lo prueban literalmente, corriendo contra fakes en memoria. |
 | **I**SP | Puertos chicos y específicos (`ProcessedEventRepository` tiene un solo método) en vez de un `Repository` genérico gigante. El caso más explícito: los endpoints de lectura del panel no ensancharon `OrderRepository`/`OutboxRepository` — se agregaron `OrderQueryPort`/`OutboxQueryPort` aparte, para que el relay y el caso de uso de creación sigan viendo exactamente los métodos que usan. |
 | **D**IP | `application/` depende de interfaces (`application/port/out/*`), nunca de las clases JPA/Kafka concretas — la dirección de la dependencia siempre apunta hacia adentro del hexágono. |
-| **ArchUnit** | El diferenciador real frente al resto del portfolio: SOLID acá no es una convención de code review, son 5 tests que fallan el build si alguien importa `org.springframework..` desde `domain/` o `application/`, o si un adaptador esquiva los puertos e importa `application.service` directo. |
+| **ArchUnit** | SOLID acá no es una convención de code review, son 5 tests que fallan el build si alguien importa `org.springframework..` desde `domain/` o `application/`, o si un adaptador esquiva los puertos e importa `application.service` directo. |
 
 ## Fuera de alcance (a propósito)
 
-- **Debezium / CDC**: el relay pollea la tabla outbox directamente; capturar el WAL de Postgres es una optimización real para alta escala, no necesaria para demostrar el patrón.
+- **Debezium / CDC**: el relay pollea la tabla outbox directamente; capturar el WAL de Postgres es una optimización real para alta escala, no necesaria a este volumen.
 - **Notificaciones reales (email/SMS)**: `Notification` se persiste y se puede consultar vía `GET /api/notifications` — no se envía nada de verdad.
 - **Autenticación**: ningún endpoint requiere login ni token — tampoco el panel, que es de solo lectura más un `POST` de demo.
 - **Streaming hacia el panel (SSE/WebSocket)**: el dashboard pollea cada 1s a propósito; ver "Decisiones puntuales".
